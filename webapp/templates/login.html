@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="min-h-[70vh] flex items-center justify-center">
+  <div class="w-full max-w-sm bg-white rounded-2xl shadow-lg p-8">
+    <div class="text-center mb-6">
+      <div class="mx-auto w-12 h-12 rounded-xl bg-brand text-white text-2xl leading-[3rem]">◎</div>
+      <h1 class="text-xl font-bold mt-3">{{ company }} Payroll</h1>
+      <p class="text-sm text-slate-500">Sign in to continue</p>
+    </div>
+    <form method="post" action="/login" class="space-y-4">
+      <div>
+        <label class="block text-sm font-medium mb-1">Username</label>
+        <input name="username" autofocus required
+               class="w-full rounded-lg border border-slate-300 px-3 py-2 focus:ring-2 focus:ring-brand-light outline-none">
+      </div>
+      <div>
+        <label class="block text-sm font-medium mb-1">Password</label>
+        <input name="password" type="password" required
+               class="w-full rounded-lg border border-slate-300 px-3 py-2 focus:ring-2 focus:ring-brand-light outline-none">
+      </div>
+      <button class="w-full bg-brand hover:bg-brand-light text-white font-semibold rounded-lg py-2.5 transition">
+        Sign in
+      </button>
+    </form>
+    <div class="mt-5 text-xs text-slate-400 border-t pt-3">
+      Demo accounts — <b>preparer</b>/preparer123 · <b>approver</b>/approver123 · <b>admin</b>/admin123
+    </div>
+  </div>
+</div>
+{% endblock %}

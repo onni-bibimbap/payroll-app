@@ -1,0 +1,207 @@
+{% extends "base.html" %}
+{% block nav_payroll %}font-semibold underline{% endblock %}
+{% set badge = {'draft':'bg-slate-200 text-slate-700','pending':'bg-amber-100 text-amber-800','approved':'bg-emerald-100 text-emerald-800','rejected':'bg-red-100 text-red-700'} %}
+{% set editable = run.editable_by(user) %}
+{% set ro = 'readonly' if not editable else '' %}
+{% set dis = 'disabled' if not editable else '' %}
+{% block content %}
+{% macro cell(field, s, value, w='w-20', step='any') %}
+<input name="{{ field }}__{{ s.id }}" value="{{ '%g'|format(value|float) if value not in (None,'') else '' }}"
+  inputmode="decimal" step="{{ step }}" type="number" {{ ro }}
+  class="{{ w }} text-right rounded border border-slate-200 px-1.5 py-1 text-sm {{ 'bg-slate-50 text-slate-500' if not editable }}">
+{% endmacro %}
+
+<div class="mb-1"><a href="/payroll" class="text-sm text-slate-500 hover:underline">&larr; Payroll</a></div>
+<div class="flex flex-wrap items-center gap-2 mb-4">
+  <h1 class="text-xl sm:text-2xl font-bold">{{ run.period_label }}</h1>
+  <span class="text-xs font-medium px-2 py-1 rounded {{ badge[run.status] }}">{{ run.status_label }}</span>
+  <span class="text-sm text-slate-500">{{ totals.headcount }} staff</span>
+  {% if run.status=='pending' and user.can_approve %}<span class="text-xs text-amber-700">— you can edit and approve below</span>{% endif %}
+  <div class="w-full sm:w-auto sm:ml-auto flex flex-wrap items-center gap-2">
+    <a href="/payroll/{{ run.id }}/dashboard" class="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm">Dashboard</a>
+    <a href="/payroll/{{ run.id }}/pdf" target="_blank" class="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm">PDF</a>
+    {% if run.status != 'approved' and user.can_prepare %}
+      <form method="post" action="/payroll/{{ run.id }}/delete" onsubmit="return confirm('Delete this entire payroll run?')">
+        <button class="px-3 py-2 rounded-lg border border-red-200 text-red-600 bg-white text-sm">Delete</button></form>
+    {% endif %}
+  </div>
+</div>
+
+{% if run.status=='rejected' and run.note %}<div class="mb-3 text-sm bg-red-50 border border-red-200 text-red-800 rounded-lg px-3 py-2">Returned by approver: {{ run.note }}</div>{% endif %}
+{% if run.status=='pending' and user.can_approve %}
+<div id="rejectBox" class="hidden mb-3"><form method="post" action="/payroll/{{ run.id }}/reject" class="bg-white border rounded-lg p-3 flex flex-col sm:flex-row gap-2">
+  <input name="note" placeholder="Reason for returning to preparer…" class="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm">
+  <button class="px-4 py-2 rounded-lg bg-red-600 text-white text-sm font-semibold">Return to preparer</button></form></div>
+{% endif %}
+
+{% if editable %}
+<div class="bg-white rounded-xl shadow p-3 mb-4 flex flex-col sm:flex-row sm:items-end gap-2">
+  <form method="post" action="/payroll/{{ run.id }}/add" class="flex-1" id="addForm">
+    <label class="block text-[11px] font-medium text-slate-500 mb-1">Add staff — type a name</label>
+    <div class="relative">
+      <input id="staffSearch" autocomplete="off" placeholder="Start typing…"
+        class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
+      <input type="hidden" name="employee_id" id="staffId">
+      <div id="staffList" class="hidden absolute z-30 mt-1 w-full max-h-64 overflow-auto bg-white border border-slate-200 rounded-lg shadow-lg">
+        {% for e in available %}
+        <div class="staff-opt px-3 py-2 text-sm hover:bg-slate-100 cursor-pointer" data-id="{{ e.id }}"
+             data-name="{{ e.name }} {{ e.emp_code }}">
+          {{ e.name }} <span class="text-slate-400 text-xs">· {{ e.emp_code }} · {{ 'FT ' ~ (e.basic_salary|money) if e.employment_type=='full_time' else 'PT ' ~ (e.hourly_rate|money) ~ '/hr' }}</span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </form>
+  <div class="flex gap-2">
+    <button form="addForm" class="px-4 py-2 rounded-lg bg-moss text-white text-sm font-semibold">+ Add</button>
+    <form method="post" action="/payroll/{{ run.id }}/sync"><button class="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm whitespace-nowrap">Add all ({{ available|length }})</button></form>
+  </div>
+</div>
+{% endif %}
+
+{% if not slips %}
+  <div class="bg-white rounded-xl shadow p-10 text-center text-slate-400">No staff on this run yet.{% if editable %} Add staff above.{% endif %}</div>
+{% else %}
+<form id="payrollForm" method="post" action="/payroll/{{ run.id }}/save" class="pb-24">
+<div class="bg-white rounded-xl shadow overflow-x-auto">
+  <table class="text-xs whitespace-nowrap min-w-full payroll-grid">
+    <thead>
+      <tr class="bg-brand text-white text-left">
+        <th class="sticky left-0 bg-brand px-3 py-2 z-10">Employee</th>
+        <th class="px-2 py-2 text-center" title="Apply KWSP/EPF">KWSP</th>
+        <th class="px-2 py-2 text-center" title="Apply SOCSO/EIS">SOC</th>
+        <th class="px-2 py-2 text-right">Basic / Rate·Hrs</th>
+        <th class="px-2 py-2 text-right">Allowance</th>
+        <th class="px-2 py-2 text-right">OT hrs</th>
+        <th class="px-2 py-2 text-right">OT rate</th>
+        <th class="px-2 py-2 text-right">Deduction</th>
+        <th class="px-2 py-2 text-right bg-brand-light">Gross</th>
+        <th class="px-2 py-2 text-right bg-brand-light">EPF</th>
+        <th class="px-2 py-2 text-right bg-brand-light">SOCSO</th>
+        <th class="px-2 py-2 text-right bg-brand-light">EIS</th>
+        <th class="px-2 py-2 text-right bg-brand-light">PCB</th>
+        <th class="px-2 py-2 text-right bg-moss">NET</th>
+        <th class="px-2 py-2 text-right bg-moss">Emp cost</th>
+        <th class="px-2 py-2"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in slips %}
+      <tr class="border-b hover:bg-slate-50 align-top">
+        <td class="sticky left-0 bg-white px-3 py-2 z-10">
+          <div class="font-medium">{{ s.name }}</div>
+          <div class="text-[10px] text-slate-400 font-mono">{{ s.emp_code }} · {{ 'PT' if s.hourly else 'FT' }}</div>
+        </td>
+        <td class="px-2 py-2 text-center"><input type="checkbox" name="epf_enabled__{{ s.id }}" {{ 'checked' if s.epf_enabled }} {{ dis }}></td>
+        <td class="px-2 py-2 text-center"><input type="checkbox" name="socso_enabled__{{ s.id }}" {{ 'checked' if s.socso_enabled }} {{ dis }}></td>
+        <td class="px-2 py-2 text-right">
+          {% if s.hourly %}
+            <div class="flex items-center gap-1 justify-end">{{ cell('rate', s, s.rate, 'w-14') }}<span class="text-slate-400">×</span>{{ cell('units', s, s.units, 'w-14') }}</div>
+          {% else %}{{ cell('basic', s, s.basic) }}{% endif %}
+        </td>
+        <td class="px-2 py-2 text-right">{{ cell('allowance', s, s.allowance) }}</td>
+        <td class="px-2 py-2 text-right">{{ cell('ot_hours', s, s.ot_hours, 'w-14') }}</td>
+        <td class="px-2 py-2 text-right">{{ cell('ot_rate', s, s.ot_rate, 'w-14') }}</td>
+        <td class="px-2 py-2 text-right">{{ cell('deduction', s, s.deduction) }}</td>
+        <td class="px-2 py-2 text-right bg-emerald-50/40 font-medium">{{ s.total_remuneration|money }}</td>
+        <td class="px-2 py-2 text-right">{{ s.epf_employee|money }}</td>
+        <td class="px-2 py-2 text-right">{{ s.socso_employee|money }}</td>
+        <td class="px-2 py-2 text-right">{{ s.eis_employee|money }}</td>
+        <td class="px-2 py-2 text-right">{{ s.pcb|money }}</td>
+        <td class="px-2 py-2 text-right font-bold text-emerald-700 bg-emerald-50">{{ s.net_salary|money }}</td>
+        <td class="px-2 py-2 text-right">{{ s.employer_cost|money }}</td>
+        <td class="px-2 py-2 text-right whitespace-nowrap">
+          <button type="button" onclick="document.getElementById('exp{{ s.id }}').classList.toggle('hidden')" class="text-slate-400 hover:text-brand" title="More">▾</button>
+          {% if editable %}<button type="submit" form="rm{{ s.id }}" title="Remove" class="text-slate-300 hover:text-red-600 ml-1">✕</button>{% endif %}
+        </td>
+      </tr>
+      <tr id="exp{{ s.id }}" class="hidden bg-slate-50 border-b">
+        <td class="sticky left-0 bg-slate-50 px-3 py-2 z-10 text-[11px] text-slate-400">details</td>
+        <td colspan="15" class="px-3 py-2">
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px]">
+            {% if not s.hourly %}
+            <label class="flex items-center gap-1"><input type="checkbox" name="count_by_day__{{ s.id }}" {{ 'checked' if s.count_by_day }} {{ dis }}> Count by day → rate {{ cell('rate', s, s.rate, 'w-14') }} × days {{ cell('units', s, s.units, 'w-12') }}</label>
+            {% endif %}
+            <label class="flex items-center gap-1"><input type="checkbox" name="include_allowance__{{ s.id }}" {{ 'checked' if s.include_allowance }} {{ dis }}> Allowance in statutory</label>
+            <label class="flex items-center gap-1"><input type="checkbox" name="include_ot__{{ s.id }}" {{ 'checked' if s.include_ot }} {{ dis }}> OT in statutory</label>
+            <label class="flex items-center gap-1"><input type="checkbox" name="over_60__{{ s.id }}" {{ 'checked' if s.over_60 }} {{ dis }}> Age ≥60</label>
+            <label class="flex items-center gap-1"><input type="checkbox" name="foreign__{{ s.id }}" {{ 'checked' if s.foreign }} {{ dis }}> Foreign</label>
+            <label class="flex items-center gap-1">Deduction reason <input name="deduction_reason__{{ s.id }}" value="{{ s.deduction_reason or '' }}" {{ ro }} class="rounded border border-slate-200 px-2 py-1 {{ 'bg-slate-100' if not editable }}"></label>
+            <label class="flex items-center gap-1">PCB override {{ cell('pcb_override', s, s.pcb_override, 'w-16') }}</label>
+            <label class="flex items-center gap-1 flex-1 min-w-[12rem]">Notes <input name="notes__{{ s.id }}" value="{{ s.notes or '' }}" {{ ro }} class="flex-1 rounded border border-slate-200 px-2 py-1 {{ 'bg-slate-100' if not editable }}"></label>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+    <tfoot>
+      <tr class="bg-slate-100 font-bold border-t-2 border-slate-300">
+        <td class="sticky left-0 bg-slate-100 px-3 py-2 z-10">TOTALS</td>
+        <td colspan="7"></td>
+        <td class="px-2 py-2 text-right">{{ totals.total_remuneration|money }}</td>
+        <td class="px-2 py-2 text-right">{{ totals.epf_employee|money }}</td>
+        <td class="px-2 py-2 text-right">{{ totals.socso_employee|money }}</td>
+        <td class="px-2 py-2 text-right">{{ totals.eis_employee|money }}</td>
+        <td class="px-2 py-2 text-right">{{ totals.pcb|money }}</td>
+        <td class="px-2 py-2 text-right text-emerald-700">{{ totals.net_salary|money }}</td>
+        <td class="px-2 py-2 text-right">{{ totals.employer_cost|money }}</td>
+        <td></td>
+      </tr>
+    </tfoot>
+  </table>
+</div>
+
+<div class="bg-white rounded-xl shadow p-4 mt-4">
+  <label class="block text-sm font-medium mb-1">Remarks for this payroll (optional)</label>
+  <textarea name="remarks" rows="2" {{ ro }} placeholder="Notes for the approver…"
+    class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm {{ 'bg-slate-50' if not editable }}">{{ run.remarks or '' }}</textarea>
+</div>
+</form>
+{% if editable %}{% for s in slips %}<form id="rm{{ s.id }}" method="post" action="/payroll/{{ run.id }}/remove/{{ s.id }}" class="hidden"></form>{% endfor %}{% endif %}
+<p class="text-[11px] text-slate-400 mt-2">Amounts drive it: type an Allowance / OT / Deduction and it's applied on <b>Save</b>. Statutory wage = base only; use ▾ to include allowance/OT across EPF·SOCSO·EIS·PCB. Green = auto-derived.</p>
+
+{# sticky action bar #}
+<div class="fixed bottom-0 inset-x-0 z-20 bg-white/95 backdrop-blur border-t shadow-lg">
+  <div class="max-w-7xl mx-auto px-4 py-2.5 flex items-center gap-3">
+    <div class="text-xs sm:text-sm">
+      <div><span class="text-slate-500">Net payout</span> <b class="text-emerald-700">RM {{ totals.net_salary|money }}</b></div>
+      <div class="text-slate-400 text-[11px] hidden sm:block">Employer cost RM {{ totals.employer_cost|money }} · {{ totals.headcount }} staff</div>
+    </div>
+    <div class="ml-auto flex items-center gap-2">
+      {% if editable %}<button form="payrollForm" class="px-4 py-2.5 rounded-lg bg-brand text-white text-sm font-semibold">Save &amp; Recalculate</button>{% endif %}
+      {% if run.status in ('draft','rejected') and user.can_prepare %}
+        <form method="post" action="/payroll/{{ run.id }}/submit" onsubmit="return confirm('Save your edits first. Send for approval now?')"><button class="px-4 py-2.5 rounded-lg bg-moss text-white text-sm font-semibold">Send →</button></form>
+      {% elif run.status=='pending' and user.can_approve %}
+        <form method="post" action="/payroll/{{ run.id }}/approve" onsubmit="return confirm('Approve and lock this payroll?')"><button class="px-4 py-2.5 rounded-lg bg-emerald-600 text-white text-sm font-semibold">✓ Approve</button></form>
+        <button type="button" onclick="document.getElementById('rejectBox').classList.toggle('hidden')" class="px-3 py-2.5 rounded-lg bg-red-600 text-white text-sm font-semibold">Reject</button>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<script>
+  // Searchable add-staff combobox
+  (function(){
+    var input = document.getElementById('staffSearch');
+    var list = document.getElementById('staffList');
+    var hid = document.getElementById('staffId');
+    if(!input) return;
+    var opts = [].slice.call(document.querySelectorAll('.staff-opt'));
+    function show(){ list.classList.remove('hidden'); }
+    function hide(){ setTimeout(function(){ list.classList.add('hidden'); }, 150); }
+    input.addEventListener('focus', show);
+    input.addEventListener('blur', hide);
+    input.addEventListener('input', function(){
+      var q = input.value.toLowerCase(); hid.value = '';
+      opts.forEach(function(o){ o.style.display = o.dataset.name.toLowerCase().indexOf(q) > -1 ? '' : 'none'; });
+      show();
+    });
+    opts.forEach(function(o){
+      o.addEventListener('mousedown', function(){
+        hid.value = o.dataset.id; input.value = o.dataset.name; list.classList.add('hidden');
+      });
+    });
+  })();
+</script>
+{% endblock %}

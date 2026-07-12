@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ company }} Payroll{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { theme: { extend: { colors: {
+      brand: { DEFAULT: '#1F3864', light: '#2E75B6' }, moss: '#548235' } } } }
+  </script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="bg-slate-100 text-slate-800 min-h-screen">
+{% if user %}
+<nav class="bg-brand text-white shadow sticky top-0 z-30">
+  <div class="max-w-7xl mx-auto px-4 flex items-center gap-4 sm:gap-6 h-14">
+    <a href="/payroll" class="font-bold text-base sm:text-lg tracking-tight flex items-center gap-2 shrink-0">
+      <span class="inline-block w-7 h-7 rounded bg-moss text-center leading-7">◎</span>
+      <span class="hidden xs:inline sm:inline">{{ company }} Payroll</span>
+    </a>
+    <a href="/payroll" class="text-sm sm:text-base hover:text-white/80 {% block nav_payroll %}{% endblock %}">Payroll</a>
+    <a href="/employees" class="text-sm sm:text-base hover:text-white/80 {% block nav_emp %}{% endblock %}">Staff</a>
+    {% if user.role == 'admin' %}<a href="/settings" class="text-sm sm:text-base hover:text-white/80 {% block nav_settings %}{% endblock %}">Settings</a>{% endif %}
+    <div class="ml-auto flex items-center gap-2 sm:gap-3 text-sm">
+      <span class="hidden sm:inline px-2 py-1 rounded bg-white/15">{{ user.full_name or user.username }}
+        <span class="opacity-70">· {{ user.role }}</span></span>
+      <a href="/logout" class="hover:underline opacity-90">Logout</a>
+    </div>
+  </div>
+</nav>
+{% endif %}
+
+<main class="max-w-7xl mx-auto px-5 py-6">
+  {% for m in messages %}
+    <div class="mb-3 rounded-lg px-4 py-2.5 text-sm border
+      {{ 'bg-red-50 border-red-200 text-red-800' if m.level=='error'
+         else 'bg-emerald-50 border-emerald-200 text-emerald-800' }}">
+      {{ m.msg }}
+    </div>
+  {% endfor %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

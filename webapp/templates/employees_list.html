@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block nav_emp %}font-semibold underline{% endblock %}
+{% block content %}
+<div class="flex items-center gap-3 mb-4">
+  <h1 class="text-2xl font-bold">Employees</h1>
+  <div class="ml-auto flex items-center gap-2 text-sm">
+    <a href="?show=active" class="px-3 py-1.5 rounded-lg border {{ 'bg-brand text-white border-brand' if show=='active' else 'bg-white border-slate-300' }}">Active ({{ counts.active }})</a>
+    <a href="?show=all" class="px-3 py-1.5 rounded-lg border {{ 'bg-brand text-white border-brand' if show=='all' else 'bg-white border-slate-300' }}">All ({{ counts.all }})</a>
+    <a href="?show=review" class="px-3 py-1.5 rounded-lg border {{ 'bg-amber-500 text-white border-amber-500' if show=='review' else 'bg-white border-slate-300' }}">⚠ Review ({{ counts.review }})</a>
+    {% if user.can_prepare %}
+    <a href="/employees/new" class="px-3 py-1.5 rounded-lg bg-moss text-white font-semibold">+ New employee</a>
+    {% endif %}
+  </div>
+</div>
+
+<div class="bg-white rounded-xl shadow overflow-hidden">
+  <table class="w-full text-sm">
+    <thead class="bg-slate-50 text-slate-500 text-left">
+      <tr class="border-b">
+        <th class="px-3 py-2.5">Code</th><th class="px-3 py-2.5">Name</th>
+        <th class="px-3 py-2.5">Type</th><th class="px-3 py-2.5 text-right">Basic / Rate</th>
+        <th class="px-3 py-2.5">Bank</th><th class="px-3 py-2.5 text-center">EPF</th>
+        <th class="px-3 py-2.5 text-center">SOCSO</th><th class="px-3 py-2.5"></th>
+        <th class="px-3 py-2.5"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in employees %}
+      <tr class="border-b last:border-0 hover:bg-slate-50 {{ 'bg-amber-50' if e.needs_review }}">
+        <td class="px-3 py-2 font-mono text-xs">{{ e.emp_code }}</td>
+        <td class="px-3 py-2 font-medium">{{ e.name }}
+          {% if not e.active %}<span class="text-xs text-slate-400">(inactive)</span>{% endif %}
+          {% if e.is_foreign %}<span class="text-[10px] bg-slate-200 rounded px-1">foreign</span>{% endif %}
+          {% if e.needs_review %}<span title="{{ e.import_note }}" class="text-[10px] bg-amber-200 text-amber-800 rounded px-1">⚠ review</span>{% endif %}
+        </td>
+        <td class="px-3 py-2">{{ 'Full-time' if e.employment_type=='full_time' else 'Part-time' }}</td>
+        <td class="px-3 py-2 text-right">
+          {% if e.employment_type=='full_time' %}{{ e.basic_salary|money }}
+          {% else %}<span class="text-slate-500">{{ e.hourly_rate|money }}/hr</span>{% endif %}
+        </td>
+        <td class="px-3 py-2 text-slate-600">{{ e.bank_name or '—' }}</td>
+        <td class="px-3 py-2 text-center">{{ '✓' if e.epf_enabled else '·' }}</td>
+        <td class="px-3 py-2 text-center">{{ '✓' if e.socso_enabled else '·' }}</td>
+        {% if user.can_prepare %}
+        <td class="px-3 py-2 text-right"><a href="/employees/{{ e.id }}" class="text-brand-light hover:underline">Edit</a></td>
+        <td class="px-2 py-2">
+          <form method="post" action="/employees/{{ e.id }}/toggle">
+            <button class="text-xs text-slate-400 hover:text-red-600">{{ 'Deactivate' if e.active else 'Activate' }}</button>
+          </form>
+        </td>
+        {% else %}<td></td><td></td>{% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

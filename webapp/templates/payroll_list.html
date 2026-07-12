@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block nav_payroll %}font-semibold underline{% endblock %}
+{% set badge = {'draft':'bg-slate-200 text-slate-700','pending':'bg-amber-100 text-amber-800','approved':'bg-emerald-100 text-emerald-800','rejected':'bg-red-100 text-red-700'} %}
+{% block content %}
+<div class="flex items-center mb-4">
+  <h1 class="text-2xl font-bold">Monthly Payroll</h1>
+  <span class="ml-3 text-sm text-slate-500">{{ active_emps }} active employees</span>
+</div>
+
+{% if user.can_prepare %}
+<form method="post" action="/payroll" class="bg-white rounded-xl shadow p-4 mb-5 flex flex-wrap items-end gap-3">
+  <div>
+    <label class="block text-xs font-medium text-slate-500 mb-1">Month</label>
+    <select name="month" class="rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white">
+      {% for m in range(1,13) %}
+      <option value="{{ m }}" {{ 'selected' if m==this_month }}>{{ ['','January','February','March','April','May','June','July','August','September','October','November','December'][m] }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label class="block text-xs font-medium text-slate-500 mb-1">Year</label>
+    <input name="year" type="number" value="{{ this_year }}" class="w-24 rounded-lg border border-slate-300 px-3 py-2 text-sm">
+  </div>
+  <div>
+    <label class="block text-xs font-medium text-slate-500 mb-1">Working days</label>
+    <input name="work_days" type="number" value="{{ default_work_days }}" class="w-20 rounded-lg border border-slate-300 px-3 py-2 text-sm">
+  </div>
+  <button class="bg-moss text-white font-semibold rounded-lg px-5 py-2.5">+ Create payroll run</button>
+  <span class="text-xs text-slate-400">Generates a draft payslip for every active employee.</span>
+</form>
+{% endif %}
+
+<div class="bg-white rounded-xl shadow overflow-hidden">
+  <table class="w-full text-sm">
+    <thead class="bg-slate-50 text-slate-500 text-left">
+      <tr class="border-b">
+        <th class="px-4 py-2.5">Period</th><th class="px-4 py-2.5">Status</th>
+        <th class="px-4 py-2.5 text-right">Headcount</th>
+        <th class="px-4 py-2.5 text-right">Net payout</th>
+        <th class="px-4 py-2.5 text-right">Employer cost</th>
+        <th class="px-4 py-2.5">Prepared / Approved</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in runs %}
+      <tr class="border-b last:border-0 hover:bg-slate-50">
+        <td class="px-4 py-3 font-semibold"><a href="/payroll/{{ r.id }}" class="hover:underline">{{ r.period_label }}</a></td>
+        <td class="px-4 py-3"><span class="text-xs font-medium px-2 py-1 rounded {{ badge[r.status] }}">{{ r.status_label }}</span></td>
+        <td class="px-4 py-3 text-right">{{ totals[r.id].headcount }}</td>
+        <td class="px-4 py-3 text-right font-medium">{{ totals[r.id].net_salary|money }}</td>
+        <td class="px-4 py-3 text-right">{{ totals[r.id].employer_cost|money }}</td>
+        <td class="px-4 py-3 text-xs text-slate-500">{{ r.prepared_by or '—' }} / {{ r.approved_by or '—' }}</td>
+        <td class="px-4 py-3 text-right whitespace-nowrap">
+          <a href="/payroll/{{ r.id }}" class="text-brand-light hover:underline">Open</a>
+          <a href="/payroll/{{ r.id }}/dashboard" class="text-brand-light hover:underline ml-2">Dashboard</a>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">No payroll runs yet. Create one above.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

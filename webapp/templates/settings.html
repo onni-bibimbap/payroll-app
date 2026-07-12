@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block nav_settings %}font-semibold underline{% endblock %}
+{% block content %}
+<div class="max-w-4xl mx-auto">
+  <h1 class="text-2xl font-bold mb-1">Platform Settings</h1>
+  <p class="text-sm text-slate-500 mb-5">Defaults applied across the whole platform. Statutory rates
+     feed every EPF / SOCSO / EIS / PCB calculation. Changes apply to any payroll
+     <b>recalculated after saving</b>; already-approved runs keep the rates they were approved with.</p>
+
+  <form method="post" action="/settings" class="space-y-5">
+    {% macro money(label, name, val, prefix='RM', hint='') %}
+      <div>
+        <label class="block text-xs font-medium text-slate-500 mb-1">{{ label }}</label>
+        <div class="flex items-center rounded-lg border border-slate-300 overflow-hidden bg-white">
+          <span class="px-2 text-slate-400 text-sm bg-slate-50 py-2">{{ prefix }}</span>
+          <input name="{{ name }}" type="number" step="any" value="{{ '%g'|format(val|float) }}"
+                 readonly class="lockable flex-1 px-2 py-2 text-sm outline-none bg-slate-50">
+        </div>
+        {% if hint %}<div class="text-[11px] text-slate-400 mt-0.5">{{ hint }}</div>{% endif %}
+      </div>
+    {% endmacro %}
+    {% macro pct(label, name, val, hint='') %}
+      <div>
+        <label class="block text-xs font-medium text-slate-500 mb-1">{{ label }}</label>
+        <div class="flex items-center rounded-lg border border-slate-300 overflow-hidden bg-white">
+          <input name="{{ name }}" type="number" step="any" value="{{ '%g'|format((val|float)*100) }}"
+                 readonly class="lockable flex-1 px-2 py-2 text-sm outline-none bg-slate-50">
+          <span class="px-2 text-slate-400 text-sm bg-slate-50 py-2">%</span>
+        </div>
+        {% if hint %}<div class="text-[11px] text-slate-400 mt-0.5">{{ hint }}</div>{% endif %}
+      </div>
+    {% endmacro %}
+
+    <section class="bg-white rounded-xl shadow p-5">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <h2 class="font-semibold">Statutory reference (example calculations)</h2>
+          <p class="text-xs text-slate-400">For reference only — read-only. These are the figures your provider supplied.</p>
+        </div>
+        <label class="flex items-center gap-2 text-xs text-red-600 whitespace-nowrap"><input type="checkbox" id="unlockRates"> Unlock rates to edit</label>
+      </div>
+      <div class="overflow-x-auto mt-3">
+        <table class="text-xs whitespace-nowrap min-w-full">
+          <thead class="bg-slate-50 text-slate-500 text-right">
+            <tr><th class="px-2 py-1.5 text-left">Gross</th><th class="px-2 py-1.5">OT pay</th><th class="px-2 py-1.5">PCB</th>
+              <th class="px-2 py-1.5 bg-slate-100">EPF (ee)</th><th class="px-2 py-1.5 bg-slate-100">SOCSO (ee)</th><th class="px-2 py-1.5 bg-slate-100">EIS (ee)</th>
+              <th class="px-2 py-1.5">EPF (er)</th><th class="px-2 py-1.5">SOCSO (er)</th><th class="px-2 py-1.5">EIS (er)</th></tr>
+          </thead>
+          <tbody class="text-right divide-y">
+            <tr><td class="px-2 py-1.5 text-left font-medium">5,000</td><td class="px-2 py-1.5">0.00</td><td class="px-2 py-1.5">108.35</td>
+              <td class="px-2 py-1.5 bg-slate-50">550.00</td><td class="px-2 py-1.5 bg-slate-50">61.90</td><td class="px-2 py-1.5 bg-slate-50">9.90</td>
+              <td class="px-2 py-1.5">650.00</td><td class="px-2 py-1.5">86.65</td><td class="px-2 py-1.5">9.90</td></tr>
+            <tr><td class="px-2 py-1.5 text-left font-medium">3,200</td><td class="px-2 py-1.5">200.00</td><td class="px-2 py-1.5">—</td>
+              <td class="px-2 py-1.5 bg-slate-50">352.00</td><td class="px-2 py-1.5 bg-slate-50">39.40</td><td class="px-2 py-1.5 bg-slate-50">6.30</td>
+              <td class="px-2 py-1.5">416.00</td><td class="px-2 py-1.5">55.15</td><td class="px-2 py-1.5">6.30</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="text-[11px] text-amber-700 mt-2">⚠ Note: this reference shows SOCSO employee at 1.25% (RM61.90 / RM39.40). The live engine and your original May sheet use the statutory 0.5% (RM24.75 / RM15.75). Tell us if the engine should switch to match this reference.</p>
+    </section>
+
+    <section class="bg-white rounded-xl shadow p-5">
+      <h2 class="font-semibold mb-3">General</h2>
+      <div class="grid md:grid-cols-3 gap-4">
+        <div>
+          <label class="block text-xs font-medium text-slate-500 mb-1">Company name (payslips &amp; PDFs)</label>
+          <input name="company_name" value="{{ s.company_name }}" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-500 mb-1">Default working days / month</label>
+          <input name="default_work_days" type="number" value="{{ s.default_work_days }}" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
+        </div>
+        {{ money('Default OT rate (fallback)', 'default_ot_rate', s.default_ot_rate, hint='Used when an employee has no OT rate set') }}
+      </div>
+    </section>
+
+    <section class="bg-white rounded-xl shadow p-5">
+      <h2 class="font-semibold mb-3">EPF / KWSP</h2>
+      <div class="grid md:grid-cols-4 gap-4">
+        {{ pct('Employee rate', 'epf_emp_rate', s.epf_emp_rate) }}
+        {{ pct('Employer rate (≤ threshold)', 'epf_er_rate_low', s.epf_er_rate_low) }}
+        {{ pct('Employer rate (> threshold)', 'epf_er_rate_high', s.epf_er_rate_high) }}
+        {{ money('Employer rate threshold', 'epf_er_threshold', s.epf_er_threshold, hint='13% at/below, 12% above') }}
+      </div>
+    </section>
+
+    <section class="bg-white rounded-xl shadow p-5">
+      <h2 class="font-semibold mb-3">SOCSO / EIS</h2>
+      <div class="grid md:grid-cols-3 gap-4">
+        {{ money('Wage ceiling', 'socso_eis_ceiling', s.socso_eis_ceiling, hint='Contribution capped at this wage') }}
+        {{ pct('SOCSO Cat 1 employee', 'socso_c1_emp', s.socso_c1_emp) }}
+        {{ pct('SOCSO Cat 1 employer', 'socso_c1_er', s.socso_c1_er) }}
+        {{ pct('SOCSO Cat 2 employer (age ≥60)', 'socso_c2_er', s.socso_c2_er) }}
+        {{ pct('EIS rate (each side)', 'eis_rate', s.eis_rate) }}
+      </div>
+    </section>
+
+    <section class="bg-white rounded-xl shadow p-5">
+      <h2 class="font-semibold mb-3">PCB (income tax) reliefs</h2>
+      <div class="grid md:grid-cols-4 gap-4">
+        {{ money('Personal relief / yr', 'personal_relief', s.personal_relief) }}
+        {{ money('EPF relief cap / yr', 'epf_relief_cap', s.epf_relief_cap) }}
+        {{ money('Rebate', 'tax_rebate', s.tax_rebate) }}
+        {{ money('Rebate ceiling', 'rebate_ceiling', s.rebate_ceiling, hint='Rebate applies at/below this chargeable income') }}
+      </div>
+      <p class="text-[11px] text-slate-400 mt-2">Resident tax brackets are fixed to YA2024/2025. PCB remains an MTD estimate; use the per-line PCB override for the official LHDN figure.</p>
+    </section>
+
+    <section class="bg-white rounded-xl shadow p-5">
+      <h2 class="font-semibold mb-3">Default toggles for new payroll lines &amp; employees</h2>
+      <div class="grid md:grid-cols-3 gap-3 text-sm">
+        <label class="flex items-center gap-2"><input type="checkbox" name="default_include_allowance" {{ 'checked' if s.default_include_allowance }}> Include allowance in statutory by default</label>
+        <label class="flex items-center gap-2"><input type="checkbox" name="default_include_ot" {{ 'checked' if s.default_include_ot }}> Include OT in statutory by default</label>
+        <div></div>
+        <label class="flex items-center gap-2"><input type="checkbox" name="ft_default_epf" {{ 'checked' if s.ft_default_epf }}> Full-time: EPF by default</label>
+        <label class="flex items-center gap-2"><input type="checkbox" name="ft_default_socso" {{ 'checked' if s.ft_default_socso }}> Full-time: SOCSO/EIS by default</label>
+        <div></div>
+        <label class="flex items-center gap-2"><input type="checkbox" name="pt_default_epf" {{ 'checked' if s.pt_default_epf }}> Part-time: EPF by default</label>
+        <label class="flex items-center gap-2"><input type="checkbox" name="pt_default_socso" {{ 'checked' if s.pt_default_socso }}> Part-time: SOCSO/EIS by default</label>
+      </div>
+    </section>
+
+    <div class="flex items-center gap-3">
+      <button class="bg-brand hover:bg-brand-light text-white font-semibold rounded-lg px-6 py-2.5">Save settings</button>
+      <span class="text-xs text-slate-400">Percentages are entered as whole numbers (e.g. 11 = 11%).</span>
+    </div>
+  </form>
+</div>
+<script>
+  // Statutory rates are read-only until explicitly unlocked.
+  (function(){
+    var unlock = document.getElementById('unlockRates');
+    if(!unlock) return;
+    var fields = [].slice.call(document.querySelectorAll('.lockable'));
+    function apply(){ fields.forEach(function(f){ f.readOnly = !unlock.checked; f.classList.toggle('bg-slate-50', !unlock.checked); }); }
+    unlock.addEventListener('change', apply); apply();
+  })();
+</script>
+{% endblock %}

@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block nav_payroll %}font-semibold underline{% endblock %}
+{% set badge = {'draft':'bg-slate-200 text-slate-700','pending':'bg-amber-100 text-amber-800','approved':'bg-emerald-100 text-emerald-800','rejected':'bg-red-100 text-red-700'} %}
+{% block content %}
+<div class="flex flex-wrap items-center gap-2 mb-4">
+  <a href="/payroll/{{ run.id }}" class="text-sm text-slate-500 hover:underline">&larr; {{ run.period_label }}</a>
+  <h1 class="text-xl sm:text-2xl font-bold">Review — {{ run.period_label }}</h1>
+  <span class="text-xs font-medium px-2 py-1 rounded {{ badge[run.status] }}">{{ run.status_label }}</span>
+  <div class="w-full sm:w-auto sm:ml-auto flex flex-wrap gap-2">
+    {% if run.editable_by(user) %}<a href="/payroll/{{ run.id }}" class="px-3 py-2 rounded-lg bg-brand text-white text-sm font-semibold">✎ Edit payroll</a>{% endif %}
+    <a href="/payroll/{{ run.id }}/pdf" target="_blank" class="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm">Summary PDF</a>
+    {% if run.status=='pending' and user.can_approve %}
+      <form method="post" action="/payroll/{{ run.id }}/approve" onsubmit="return confirm('Approve and lock this payroll?')">
+        <button class="px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold">✓ Approve</button></form>
+      <button type="button" onclick="document.getElementById('rej').classList.toggle('hidden')" class="px-3 py-2 rounded-lg bg-red-600 text-white text-sm font-semibold">Reject</button>
+    {% endif %}
+  </div>
+</div>
+{% if run.status=='pending' and user.can_approve %}
+<div id="rej" class="hidden mb-3"><form method="post" action="/payroll/{{ run.id }}/reject" class="bg-white border rounded-lg p-3 flex flex-col sm:flex-row gap-2">
+  <input name="note" placeholder="Reason for returning…" class="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm">
+  <button class="px-4 py-2 rounded-lg bg-red-600 text-white text-sm font-semibold">Return to preparer</button></form></div>
+{% endif %}
+{% if run.remarks %}<div class="mb-4 text-sm bg-amber-50 border border-amber-200 text-amber-900 rounded-lg px-3 py-2"><b>Preparer remarks:</b> {{ run.remarks }}</div>{% endif %}
+
+<div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+  {% macro card(label, value, sub='', accent='brand') %}
+    <div class="bg-white rounded-xl shadow p-4">
+      <div class="text-[11px] uppercase tracking-wide text-slate-400">{{ label }}</div>
+      <div class="text-lg sm:text-2xl font-bold text-{{ accent }} mt-1 break-words">{{ value }}</div>
+      <div class="text-[11px] text-slate-400">{{ sub }}</div>
+    </div>
+  {% endmacro %}
+  {{ card('Headcount', totals.headcount, full_time ~ ' FT · ' ~ part_time ~ ' PT') }}
+  {{ card('Net payout', 'RM ' ~ totals.net_salary|money, 'total take-home', 'emerald-700') }}
+  {{ card('Gross + OT', 'RM ' ~ totals.total_remuneration|money, 'total paid') }}
+  {{ card('Employer cost', 'RM ' ~ totals.employer_cost|money, 'incl. statutory', 'moss') }}
+</div>
+
+<div class="grid lg:grid-cols-2 gap-4 mb-5">
+  <div class="bg-white rounded-xl shadow p-5">
+    <h2 class="font-semibold mb-3">Statutory totals (employee / employer)</h2>
+    <table class="w-full text-sm">
+      <tbody class="divide-y">
+        <tr><td class="py-1.5">EPF / KWSP</td><td class="text-right">{{ totals.epf_employee|money }}</td><td class="text-right text-slate-500">{{ totals.epf_employer|money }}</td></tr>
+        <tr><td class="py-1.5">SOCSO</td><td class="text-right">{{ totals.socso_employee|money }}</td><td class="text-right text-slate-500">{{ totals.socso_employer|money }}</td></tr>
+        <tr><td class="py-1.5">EIS</td><td class="text-right">{{ totals.eis_employee|money }}</td><td class="text-right text-slate-500">{{ totals.eis_employer|money }}</td></tr>
+        <tr><td class="py-1.5">PCB (tax)</td><td class="text-right">{{ totals.pcb|money }}</td><td class="text-right text-slate-300">—</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="bg-white rounded-xl shadow p-5">
+    <h2 class="font-semibold mb-3">Net payout by bank</h2>
+    {% set maxbank = by_bank[0][1] if by_bank else 1 %}
+    <div class="space-y-2 text-sm">
+      {% for bank, amt in by_bank[:8] %}
+      <div><div class="flex justify-between"><span>{{ bank }}</span><span class="font-medium">{{ amt|money }}</span></div>
+        <div class="h-1.5 bg-slate-100 rounded"><div class="h-1.5 bg-brand-light rounded" style="width: {{ (amt/maxbank*100)|round(1) }}%"></div></div></div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+{# ---- Column glossary: what each figure means + how it's derived ---- #}
+<div class="bg-white rounded-xl shadow p-5 mb-5">
+  <h2 class="font-semibold mb-1">What each column means</h2>
+  <p class="text-xs text-slate-400 mb-3">Rates below are the live platform settings.</p>
+  <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-3 text-sm">
+    {% macro g(term, desc) %}<div><div class="font-medium text-brand">{{ term }}</div><div class="text-slate-500 text-[13px]">{{ desc }}</div></div>{% endmacro %}
+    {{ g('Base earning', 'Monthly basic, or day/hour rate × units for daily/hourly staff.') }}
+    {{ g('Allowance', 'Extra pay when eligible. Paid to staff; only in statutory if ticked.') }}
+    {{ g('Overtime', 'OT hours × OT rate. Paid; only in statutory if ticked.') }}
+    {{ g('Gross', 'Base + allowance + overtime — the total paid before deductions.') }}
+    {{ g('Statutory wage', 'The base EPF/SOCSO/EIS/PCB are charged on (basic + any included allowance/OT).') }}
+    {{ g('EPF / KWSP', 'Employee ' ~ (settings.epf_emp_rate*100)|round(2) ~ '%, employer ' ~ (settings.epf_er_rate_low*100)|round(0) ~ '% (≤RM' ~ settings.epf_er_threshold|money0 ~ ') / ' ~ (settings.epf_er_rate_high*100)|round(0) ~ '%.') }}
+    {{ g('SOCSO', 'PERKESO band table, ceiling RM' ~ settings.socso_eis_ceiling|money0 ~ '. Cat 1 employee ' ~ (settings.socso_c1_emp*100)|round(2) ~ '% + employer ' ~ (settings.socso_c1_er*100)|round(2) ~ '%.') }}
+    {{ g('EIS', (settings.eis_rate*100)|round(2) ~ '% each side (skipped for age ≥60 & foreign).') }}
+    {{ g('PCB (tax)', 'MTD estimate on annualised income less reliefs. Override with the LHDN figure.') }}
+    {{ g('Deduction', 'Manual deduction with a stated reason (e.g. unpaid leave, advance).') }}
+    {{ g('Net salary', 'Gross − EPF − SOCSO − EIS − PCB − deduction. What the employee receives.') }}
+    {{ g('Employer cost', 'Gross + employer EPF/SOCSO/EIS. What it costs the company.') }}
+  </div>
+</div>
+
+{# ---- Per-employee breakdown: bar + expandable explanation ---- #}
+<div class="bg-white rounded-xl shadow p-5">
+  <h2 class="font-semibold mb-1">Per-employee breakdown</h2>
+  <p class="text-xs text-slate-400 mb-3">Tap a row to see how every figure was derived. The bar splits the total paid into take-home and each deduction.</p>
+  <div class="space-y-2">
+    {% for s in slips %}
+    {% set total = s.total_remuneration|float if s.total_remuneration else 1 %}
+    {% set segs = [('Net', s.net_salary, '#548235'),('EPF', s.epf_employee, '#1F3864'),('SOCSO', s.socso_employee, '#2E75B6'),('EIS', s.eis_employee, '#6f9fd8'),('PCB', s.pcb, '#b45309'),('Deduction', s.deduction_amount, '#9ca3af')] %}
+    <details class="border rounded-lg">
+      <summary class="cursor-pointer px-3 py-2 flex flex-wrap items-center gap-2 hover:bg-slate-50">
+        <span class="font-medium">{{ s.name }}</span>
+        <span class="text-[11px] text-slate-400 font-mono">{{ s.emp_code }}</span>
+        <span class="ml-auto text-sm">Net <b class="text-emerald-700">RM {{ s.net_salary|money }}</b> <span class="text-slate-400 text-xs">/ gross {{ s.total_remuneration|money }}</span></span>
+      </summary>
+      <div class="px-3 pb-3">
+        <div class="whitespace-nowrap overflow-hidden rounded my-2 w-full leading-none">
+          {% for label, val, color in segs %}{% if (val|float) > 0 %}<span class="seg" title="{{ label }}: RM {{ val|money }}" style="width: {{ ((val|float)/total*100)|round(2) }}%; background: {{ color }}"></span>{% endif %}{% endfor %}
+        </div>
+        <div class="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-slate-500 mb-2">
+          {% for label, val, color in segs %}{% if (val|float) > 0 %}<span><span class="inline-block w-2.5 h-2.5 rounded-sm align-middle" style="background: {{ color }}"></span> {{ label }} {{ val|money }}</span>{% endif %}{% endfor %}
+        </div>
+        <table class="w-full text-sm">
+          <thead class="text-[11px] text-slate-400 text-left"><tr><th class="py-1">Item</th><th class="text-right">Employee</th><th class="text-right">Employer</th></tr></thead>
+          <tbody class="divide-y">
+            {% for row in breakdowns[s.id] %}
+            <tr>
+              <td class="py-1.5 align-top">
+                <div class="font-medium">{{ row.label }}</div>
+                <div class="text-[11px] text-slate-400">{{ row.note }}</div>
+              </td>
+              <td class="py-1.5 text-right align-top whitespace-nowrap">{{ row.value|money }}</td>
+              <td class="py-1.5 text-right align-top whitespace-nowrap text-slate-500">{{ row.employer|money if row.employer is not none else '' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% if s.notes %}<div class="text-[11px] text-slate-500 mt-2"><b>Notes:</b> {{ s.notes }}</div>{% endif %}
+        <a href="/payroll/{{ run.id }}/payslip/{{ s.id }}" class="text-xs text-brand-light hover:underline">Open payslip →</a>
+      </div>
+    </details>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

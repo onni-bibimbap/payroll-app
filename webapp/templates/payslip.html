@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="max-w-2xl mx-auto">
+  <div class="flex items-center gap-3 mb-3 no-print">
+    <a href="/payroll/{{ run.id }}" class="text-sm text-slate-500 hover:underline">&larr; {{ run.period_label }}</a>
+    <div class="ml-auto flex gap-2">
+      <a href="/payroll/{{ run.id }}/payslip/{{ slip.id }}/pdf" target="_blank" class="px-3 py-2 rounded-lg bg-brand text-white text-sm font-semibold">Download PDF</a>
+      <button onclick="window.print()" class="px-3 py-2 rounded-lg border border-slate-300 bg-white text-sm">Print</button>
+    </div>
+  </div>
+
+  <div class="bg-white rounded-xl shadow p-8 print-card">
+    <div class="flex items-start justify-between border-b pb-4 mb-4">
+      <div>
+        <div class="text-2xl font-bold text-brand">{{ company }}</div>
+        <div class="text-sm text-slate-500">Payslip — {{ run.period_label }}</div>
+      </div>
+      <div class="text-right text-sm">
+        <div class="font-semibold">{{ slip.name }}</div>
+        <div class="text-slate-500 font-mono text-xs">{{ slip.emp_code }}</div>
+        <div class="text-slate-500 text-xs">{{ slip.bank_name or '—' }} · {{ slip.bank_account or '—' }}</div>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-2 gap-6">
+      <div>
+        <h3 class="text-xs uppercase tracking-wide text-moss font-semibold mb-2">Earnings</h3>
+        <table class="w-full text-sm">
+          <tbody class="divide-y">
+            <tr><td class="py-1">{{ 'Base (daily)' if slip.count_by_day else 'Base (hourly)' if slip.hourly else 'Basic' }}</td><td class="text-right">{{ slip.base_earning|money }}</td></tr>
+            {% if slip.allowance_enabled and slip.allowance_total %}<tr><td class="py-1">Allowance</td><td class="text-right">{{ slip.allowance_total|money }}</td></tr>{% endif %}
+            {% if slip.ot_enabled and slip.ot_pay %}<tr><td class="py-1">Overtime pay</td><td class="text-right">{{ slip.ot_pay|money }}</td></tr>{% endif %}
+            <tr class="font-semibold border-t-2"><td class="py-1.5">Gross (incl. OT)</td><td class="text-right">{{ slip.total_remuneration|money }}</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div>
+        <h3 class="text-xs uppercase tracking-wide text-brand font-semibold mb-2">Employee deductions</h3>
+        <table class="w-full text-sm">
+          <tbody class="divide-y">
+            <tr><td class="py-1">EPF / KWSP</td><td class="text-right">{{ slip.epf_employee|money }}</td></tr>
+            <tr><td class="py-1">SOCSO</td><td class="text-right">{{ slip.socso_employee|money }}</td></tr>
+            <tr><td class="py-1">EIS</td><td class="text-right">{{ slip.eis_employee|money }}</td></tr>
+            <tr><td class="py-1">PCB (tax)</td><td class="text-right">{{ slip.pcb|money }}</td></tr>
+            {% if slip.deduction_enabled and slip.deduction_amount %}<tr><td class="py-1">Deduction — {{ slip.deduction_reason or 'other' }}</td><td class="text-right">{{ slip.deduction_amount|money }}</td></tr>{% endif %}
+            <tr class="font-semibold border-t-2"><td class="py-1.5">Total deductions</td><td class="text-right">{{ slip.total_employee_deduction|money }}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="mt-5 rounded-xl bg-moss text-white px-5 py-4 flex items-center justify-between">
+      <span class="font-semibold">NET SALARY (take-home)</span>
+      <span class="text-2xl font-bold">RM {{ slip.net_salary|money }}</span>
+    </div>
+
+    <div class="mt-5">
+      <h3 class="text-xs uppercase tracking-wide text-slate-400 font-semibold mb-2">Employer contributions (not deducted)</h3>
+      <div class="grid grid-cols-4 gap-3 text-sm">
+        <div class="bg-slate-50 rounded-lg p-2"><div class="text-xs text-slate-400">EPF</div><div class="font-semibold">{{ slip.epf_employer|money }}</div></div>
+        <div class="bg-slate-50 rounded-lg p-2"><div class="text-xs text-slate-400">SOCSO</div><div class="font-semibold">{{ slip.socso_employer|money }}</div></div>
+        <div class="bg-slate-50 rounded-lg p-2"><div class="text-xs text-slate-400">EIS</div><div class="font-semibold">{{ slip.eis_employer|money }}</div></div>
+        <div class="bg-slate-50 rounded-lg p-2"><div class="text-xs text-slate-400">Total cost</div><div class="font-semibold">{{ slip.employer_cost|money }}</div></div>
+      </div>
+    </div>
+
+    <p class="text-[11px] text-slate-400 mt-5 border-t pt-3">
+      Statutory contributions computed per KWSP / PERKESO / LHDN (YA2024/25). PCB is an MTD estimate —
+      refer to LHDN e-PCB for the official figure. Computer-generated payslip.
+    </p>
+  </div>
+</div>
+{% endblock %}

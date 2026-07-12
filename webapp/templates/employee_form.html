@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block nav_emp %}font-semibold underline{% endblock %}
+{% block content %}
+<div class="max-w-3xl mx-auto">
+  <a href="/employees" class="text-sm text-slate-500 hover:underline">&larr; Employees</a>
+  <h1 class="text-2xl font-bold mb-1 mt-1">{{ 'Edit employee' if emp else 'New employee' }}</h1>
+  {% if emp and emp.needs_review %}
+    <div class="mb-3 text-sm bg-amber-50 border border-amber-200 text-amber-800 rounded-lg px-3 py-2">
+      ⚠ Imported with low confidence: {{ emp.import_note }}
+    </div>
+  {% endif %}
+
+  <form method="post" action="/employees" class="bg-white rounded-xl shadow p-6 grid grid-cols-2 gap-4">
+    {% if emp %}<input type="hidden" name="emp_id" value="{{ emp.id }}">{% endif %}
+    {% macro field(label, name, value='', type='text', ph='') %}
+      <div>
+        <label class="block text-sm font-medium mb-1">{{ label }}</label>
+        <input name="{{ name }}" type="{{ type }}" value="{{ value }}" placeholder="{{ ph }}"
+               class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:ring-2 focus:ring-brand-light outline-none">
+      </div>
+    {% endmacro %}
+
+    {{ field('Employee code', 'emp_code', emp.emp_code if emp else '', ph='e.g. ONNI0059') }}
+    {{ field('Full name', 'name', emp.name if emp else '') }}
+
+    <div>
+      <label class="block text-sm font-medium mb-1">Employment type</label>
+      <select name="employment_type" id="employment_type" onchange="togglePay(this.value)"
+              data-new="{{ 1 if not emp else 0 }}"
+              data-ft-epf="{{ 1 if s.ft_default_epf else 0 }}" data-ft-soc="{{ 1 if s.ft_default_socso else 0 }}"
+              data-pt-epf="{{ 1 if s.pt_default_epf else 0 }}" data-pt-soc="{{ 1 if s.pt_default_socso else 0 }}"
+              class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white">
+        <option value="full_time" {{ 'selected' if not emp or emp.employment_type=='full_time' }}>Full-time (monthly)</option>
+        <option value="part_time" {{ 'selected' if emp and emp.employment_type=='part_time' }}>Part-time (hourly)</option>
+      </select>
+    </div>
+    <div class="grid grid-cols-3 gap-3">
+      {{ field('Basic salary (RM/mth)', 'basic_salary', (emp.basic_salary if emp else '0'), 'number') }}
+      {{ field('Hourly rate (RM/hr)', 'hourly_rate', (emp.hourly_rate if emp else '0'), 'number') }}
+      {{ field('OT rate (RM/hr, 0=default)', 'ot_rate', (emp.ot_rate if emp else '0'), 'number') }}
+    </div>
+
+    {{ field('Bank name', 'bank_name', emp.bank_name if emp and emp.bank_name else '') }}
+    {{ field('Bank account', 'bank_account', emp.bank_account if emp and emp.bank_account else '') }}
+    {{ field('Email', 'email', emp.email if emp and emp.email else '', 'email') }}
+    {{ field('Phone', 'phone', emp.phone if emp and emp.phone else '') }}
+    {{ field('NRIC / Passport', 'nric', emp.nric if emp and emp.nric else '') }}
+    {{ field('Date of birth', 'dob', (emp.dob.isoformat() if emp and emp.dob else ''), 'date') }}
+    {{ field('Position', 'position', emp.position if emp and emp.position else '') }}
+
+    <div class="col-span-2 grid grid-cols-2 md:grid-cols-4 gap-3 border-t pt-4 text-sm">
+      <label class="flex items-center gap-2"><input type="checkbox" id="epf_cb" name="epf_enabled" {{ 'checked' if (emp and emp.epf_enabled) or (not emp and s.ft_default_epf) }}> Apply EPF</label>
+      <label class="flex items-center gap-2"><input type="checkbox" id="soc_cb" name="socso_enabled" {{ 'checked' if (emp and emp.socso_enabled) or (not emp and s.ft_default_socso) }}> Apply SOCSO/EIS</label>
+      <label class="flex items-center gap-2"><input type="checkbox" name="allowance_eligible" {{ 'checked' if emp and emp.allowance_eligible }}> Eligible for allowance</label>
+      <label class="flex items-center gap-2"><input type="checkbox" name="is_foreign" {{ 'checked' if emp and emp.is_foreign }}> Foreign worker</label>
+      <label class="flex items-center gap-2"><input type="checkbox" name="active" {{ 'checked' if not emp or emp.active }}> Active</label>
+      {% if emp and emp.needs_review %}
+      <label class="flex items-center gap-2 text-amber-700"><input type="checkbox" name="clear_review"> Mark reviewed</label>
+      {% endif %}
+    </div>
+
+    <div class="col-span-2 flex gap-3 pt-2">
+      <button class="bg-brand hover:bg-brand-light text-white font-semibold rounded-lg px-5 py-2.5">Save employee</button>
+      <a href="/employees" class="px-5 py-2.5 rounded-lg border border-slate-300">Cancel</a>
+    </div>
+  </form>
+</div>
+<script>
+  // For a NEW employee, applying the platform default EPF/SOCSO toggles for the chosen type.
+  function togglePay(v){
+    var sel = document.getElementById('employment_type');
+    if (sel.dataset.new !== '1') return;   // don't override an existing employee's flags
+    var ft = v === 'full_time';
+    document.getElementById('epf_cb').checked = (ft ? sel.dataset.ftEpf : sel.dataset.ptEpf) === '1';
+    document.getElementById('soc_cb').checked = (ft ? sel.dataset.ftSoc : sel.dataset.ptSoc) === '1';
+  }
+</script>
+{% endblock %}
