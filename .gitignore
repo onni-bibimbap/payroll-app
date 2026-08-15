@@ -149,3 +149,4 @@ cython_debug/
 *.png
 *.jpg
 *.jpeg
+node_modules/

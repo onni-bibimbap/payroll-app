@@ -1,0 +1,20 @@
+/* Small refinements on top of Tailwind CDN */
+body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+
+.payroll-grid th, .payroll-grid td { border-right: 1px solid #eef1f5; }
+.payroll-grid input.pay-in:focus {
+  outline: 2px solid #2E75B6; outline-offset: -1px; background: #fff;
+}
+.payroll-grid tbody tr:hover .sticky { background: #f8fafc; }
+
+/* keep sticky first column above scrolling cells */
+.payroll-grid .sticky { box-shadow: 1px 0 0 #e5e7eb; }
+
+/* stacked breakdown bar segments */
+.seg { height: 1.5rem; display: inline-block; vertical-align: top; }
+
+@media print {
+  .no-print, nav { display: none !important; }
+  body { background: #fff; }
+  .print-card { box-shadow: none !important; }
+}

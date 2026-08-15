@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgres:16-alpine
+    profiles: ["local-db"]        # only started with: docker compose --profile local-db up
+    environment:
+      POSTGRES_DB: payroll
+      POSTGRES_USER: payroll
+      POSTGRES_PASSWORD: payroll
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payroll -d payroll"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build: ./backend
+    environment:
+      # From .env — points at Supabase; falls back to the local db service.
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://payroll:payroll@db:5432/payroll}
+      PAYROLL_SECRET: ${PAYROLL_SECRET:-change-me-in-production}
+      PAYROLL_COMPANY: ${PAYROLL_COMPANY:-Onni}
+      # Supabase Storage (private employee-docs bucket) — optional
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY:-}
+    expose:
+      - "8000"
+
+  ui:
+    build: ./ui
+    ports:
+      - "8077:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
