@@ -1,13 +1,20 @@
 import React, { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api.js'
+import { ErrorState, Loading } from '../components/Async.jsx'
 
 export default function HRCompliance() {
   const [data, setData] = useState(null)
+  const [error, setError] = useState(null)
   const now = new Date()
   const [period, setPeriod] = useState({ y: now.getFullYear(), m: now.getMonth() + 1 })
-  useEffect(() => { api.get('/api/hr/compliance').then(setData) }, [])
-  if (!data) return null
+  const load = () => {
+    setError(null)
+    return api.get('/api/hr/compliance').then(setData).catch((e) => setError(e.message))
+  }
+  useEffect(() => { load() }, [])
+  if (error && !data) return <ErrorState message={error} retry={load} />
+  if (!data) return <Loading label="Loading compliance board…" />
   return (
     <div className="space-y-6">
       <h1 className="text-xl font-bold">Compliance board</h1>

@@ -5,11 +5,12 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 
-from sqlalchemy import (Boolean, Date, DateTime, ForeignKey, Integer, Numeric,
-                        String, Text, UniqueConstraint, func)
+from sqlalchemy import (JSON, Boolean, Date, DateTime, ForeignKey, Integer,
+                        Numeric, String, Text, UniqueConstraint, func)
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from .core import rates
 from .database import Base
 
 MONEY = Numeric(12, 2)
@@ -27,24 +28,33 @@ class Settings(Base):
     company_name: Mapped[str] = mapped_column(String(64), default="Onni")
     default_work_days: Mapped[int] = mapped_column(Integer, default=26)
     default_ot_rate: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("15"))
-    # EPF / KWSP
-    epf_emp_rate: Mapped[Decimal] = mapped_column(RATE, default=Decimal("0.11"))
-    epf_er_rate_low: Mapped[Decimal] = mapped_column(RATE, default=Decimal("0.13"))
-    epf_er_rate_high: Mapped[Decimal] = mapped_column(RATE, default=Decimal("0.12"))
-    epf_er_threshold: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("5000"))
+    # EPF / KWSP — defaults imported from core/rates.py, the single source of
+    # truth for statutory rates. Never re-type the literals here (QT-02: the
+    # SOCSO employee share once diverged, under-deducting every employee).
+    epf_emp_rate: Mapped[Decimal] = mapped_column(RATE, default=rates.EPF_EMP_RATE)
+    epf_er_rate_low: Mapped[Decimal] = mapped_column(
+        RATE, default=rates.EPF_ER_RATE_LOW)
+    epf_er_rate_high: Mapped[Decimal] = mapped_column(
+        RATE, default=rates.EPF_ER_RATE_HIGH)
+    epf_er_threshold: Mapped[Decimal] = mapped_column(
+        MONEY, default=rates.EPF_ER_THRESHOLD)
     # SOCSO / EIS
-    socso_eis_ceiling: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("6000"))
-    socso_c1_emp: Mapped[Decimal] = mapped_column(RATE, default=Decimal("0.005"))
-    socso_c1_er: Mapped[Decimal] = mapped_column(RATE, default=Decimal("0.0175"))
-    socso_c2_er: Mapped[Decimal] = mapped_column(RATE, default=Decimal("0.0125"))
-    eis_rate: Mapped[Decimal] = mapped_column(RATE, default=Decimal("0.002"))
+    socso_eis_ceiling: Mapped[Decimal] = mapped_column(
+        MONEY, default=rates.SOCSO_EIS_CEILING)
+    socso_c1_emp: Mapped[Decimal] = mapped_column(RATE, default=rates.SOCSO_C1_EMP)
+    socso_c1_er: Mapped[Decimal] = mapped_column(RATE, default=rates.SOCSO_C1_ER)
+    socso_c2_er: Mapped[Decimal] = mapped_column(RATE, default=rates.SOCSO_C2_ER)
+    eis_rate: Mapped[Decimal] = mapped_column(RATE, default=rates.EIS_RATE)
     # PCB
-    personal_relief: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("9000"))
-    epf_relief_cap: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("4000"))
-    tax_rebate: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("400"))
-    rebate_ceiling: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("35000"))
-    # defaults applied to new payroll lines
-    default_include_allowance: Mapped[bool] = mapped_column(Boolean, default=False)
+    personal_relief: Mapped[Decimal] = mapped_column(
+        MONEY, default=rates.PERSONAL_RELIEF)
+    epf_relief_cap: Mapped[Decimal] = mapped_column(MONEY, default=rates.EPF_RELIEF_CAP)
+    tax_rebate: Mapped[Decimal] = mapped_column(MONEY, default=rates.TAX_REBATE)
+    rebate_ceiling: Mapped[Decimal] = mapped_column(MONEY, default=rates.REBATE_CEILING)
+    # defaults applied to new payroll lines (STAT-12/QT-05: these are read by
+    # payroll._new_payslip and main.run_save — the seeded defaults reproduce
+    # the long-standing behavior of "allowance in statutory base, OT never").
+    default_include_allowance: Mapped[bool] = mapped_column(Boolean, default=True)
     default_include_ot: Mapped[bool] = mapped_column(Boolean, default=False)
     # defaults applied to new employees (KWSP off by default per company policy)
     ft_default_epf: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -63,7 +73,8 @@ class User(Base):
     full_name: Mapped[str] = mapped_column(String(128), default="")
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(16), default="preparer")  # preparer|approver|admin
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now())
 
     @property
     def can_prepare(self) -> bool:
@@ -136,15 +147,22 @@ class Employee(Base):
 
     needs_review: Mapped[bool] = mapped_column(Boolean, default=False)
     import_note: Mapped[str | None] = mapped_column(Text, default=None)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime, server_default=func.now())
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now())
 
     payslips: Mapped[list["Payslip"]] = relationship(back_populates="employee")
 
     def age_on(self, when: dt.date) -> int | None:
+        """Age in whole years on ``when``; None when DOB is unknown."""
         if not self.dob or self.dob.year > when.year:
             return None
         return when.year - self.dob.year - (
             (when.month, when.day) < (self.dob.month, self.dob.day))
+
+    def over_60_on(self, when: dt.date) -> bool | None:
+        """True when aged 60 or more on ``when``; None when DOB is unknown."""
+        age = self.age_on(when)
+        return None if age is None else age >= 60
 
 
 class PayrollRun(Base):
@@ -161,9 +179,14 @@ class PayrollRun(Base):
 
     prepared_by: Mapped[str | None] = mapped_column(String(64), default=None)
     approved_by: Mapped[str | None] = mapped_column(String(64), default=None)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime, server_default=func.now())
-    submitted_at: Mapped[dt.datetime | None] = mapped_column(DateTime, default=None)
-    approved_at: Mapped[dt.datetime | None] = mapped_column(DateTime, default=None)
+    # DL-15: timezone-aware stamps (app writes Asia/Kuala_Lumpur time; the
+    # columns are timestamptz on Postgres via migration 0010).
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now())
+    submitted_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None)
+    approved_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None)
 
     payslips: Mapped[list["Payslip"]] = relationship(
         back_populates="run", cascade="all, delete-orphan")
@@ -185,16 +208,25 @@ class PayrollRun(Base):
         return self.status in ("draft", "rejected")
 
     def editable_by(self, user) -> bool:
-        """Preparer edits draft/rejected; approver may also edit while pending."""
+        """Whether ``user`` may edit payslip figures in the current state.
+
+        Only draft/rejected runs are editable, and only by a preparer.
+        A pending run is read-only for everyone (STAT-14): the approver
+        reviews exactly the submitted figures, and their only moves are the
+        approve/reject transitions — a rejection reopens editing.
+        """
         if self.status in ("draft", "rejected"):
             return bool(user and user.can_prepare)
-        if self.status == "pending":
-            return bool(user and (user.can_approve or user.can_prepare))
         return False
 
 
 class Payslip(Base):
     __tablename__ = "payslips"
+    # STAT-08: one payslip per employee per run — concurrent/retried sync or
+    # add-slip requests must not double-pay (migration 0010 enforces this on
+    # existing Postgres databases via a unique index after deduplication).
+    __table_args__ = (UniqueConstraint("run_id", "employee_id",
+                                       name="uq_payslip_run_employee"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     run_id: Mapped[int] = mapped_column(ForeignKey("payroll_runs.id"), index=True)
@@ -256,3 +288,78 @@ class Payslip(Base):
 
     run: Mapped["PayrollRun"] = relationship(back_populates="payslips")
     employee: Mapped["Employee"] = relationship(back_populates="payslips")
+
+
+# --- employee-master mirrors -------------------------------------------------
+# ORM mirrors of tables created by supabase/migrations/0002 so the payroll-run
+# builder can enforce the blocked-from-payroll rule (STAT-07/DL-01) and write
+# audit rows (SEC-06/DL-04) on every backend, including the SQLite test/dev
+# fallback where the SQL migrations never run (create_all builds them there;
+# on Postgres the migration-created tables already exist and are left alone).
+
+
+class BankAccount(Base):
+    """A bank account on record for an employee; only verified rows are paid.
+
+    Mirrors ``bank_accounts`` from migration 0002 — account numbers are TEXT,
+    never numeric (leading zeros must survive).
+    """
+
+    __tablename__ = "bank_accounts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
+    bank_name: Mapped[str] = mapped_column(Text)
+    account_no: Mapped[str] = mapped_column(Text)
+    account_holder_name: Mapped[str | None] = mapped_column(Text, default=None)
+    verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now())
+
+
+class HrReviewFlag(Base):
+    """HR review flag; an open ``blocker`` severity excludes from payroll.
+
+    Mirrors ``hr_review_flags`` from migration 0002.
+    """
+
+    __tablename__ = "hr_review_flags"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), index=True)
+    flag_type: Mapped[str] = mapped_column(Text)
+    severity: Mapped[str] = mapped_column(Text, default="warning")  # info|warning|blocker
+    details: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"), default=None)
+    status: Mapped[str] = mapped_column(
+        String(16).with_variant(
+            postgresql.ENUM("open", "resolved", "dismissed",
+                            name="flag_status", create_type=False),
+            "postgresql"),
+        default="open", index=True)
+    raised_by: Mapped[str] = mapped_column(Text, default="system")
+    resolved_by: Mapped[str | None] = mapped_column(Text, default=None)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now())
+    resolved_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None)
+
+
+class AuditLog(Base):
+    """Append-only audit trail row (actor, action, entity — names, no values).
+
+    Mirrors ``audit_log`` from migration 0002; ``changed_fields`` holds field
+    NAMES only, never values, so no RESTRICTED data can leak through auditing.
+    """
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    actor: Mapped[str | None] = mapped_column(Text, default=None)
+    action: Mapped[str] = mapped_column(Text)
+    entity: Mapped[str] = mapped_column(Text)
+    entity_id: Mapped[str] = mapped_column(Text)
+    changed_fields: Mapped[list | None] = mapped_column(
+        JSON().with_variant(postgresql.ARRAY(Text), "postgresql"), default=None)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now())

@@ -3,10 +3,25 @@ import { get as idbGet, set as idbSet, del as idbDel } from 'idb-keyval'
 
 // Public, mobile-first staff registration form (EN + BM helper text).
 // Drafts persist to IndexedDB on every change; if the network is down at
-// submit time the submission is queued and retried when back online.
+// submit time the submission — form AND selected document files — is queued
+// in IndexedDB and retried when back online (FE-03). The flush is
+// single-flight and deduped by a submission token so concurrent triggers
+// (mount + 'online' event) can never double-POST (FE-04).
 
 const DRAFT_KEY = 'onni-register-draft'
 const QUEUE_KEY = 'onni-register-queue'
+
+// Module-level so re-mounts (incl. React StrictMode double-effects) share it.
+let flushInFlight = null
+const flushedTokens = new Set()
+
+const newToken = () =>
+  (crypto.randomUUID ? crypto.randomUUID() : `t-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+
+// fetch rejects with TypeError on any network-level failure (DNS, captive
+// portal, backend down) — treat all of those as offline even when
+// navigator.onLine still claims true (FE-04).
+const isNetworkError = (err) => err instanceof TypeError
 
 const FALLBACK_BANKS = ['Maybank', 'CIMB', 'Public Bank', 'RHB', 'Hong Leong',
   'AmBank', 'Bank Islam', 'Bank Muamalat', 'Alliance', 'BSN', 'GXBank',
@@ -62,8 +77,10 @@ export default function Register() {
   const [errors, setErrors] = useState({})
   const [busy, setBusy] = useState(false)
   const [done, setDone] = useState(null)            // {reference_no, queued, docs}
+  const [flushed, setFlushed] = useState(null)      // banner: earlier queued form sent
   const [online, setOnline] = useState(navigator.onLine)
   const restored = useRef(false)
+  const dirty = useRef(false)                       // typed since restore/flush?
 
   // restore draft + watch connectivity + flush queue when back online
   useEffect(() => {
@@ -81,42 +98,74 @@ export default function Register() {
   // persist draft on every change (after initial restore)
   useEffect(() => { if (restored.current) idbSet(DRAFT_KEY, form) }, [form])
 
-  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }))
+  const set = (k) => (e) => { dirty.current = true; setForm((f) => ({ ...f, [k]: e.target.value })) }
 
-  async function flushQueue() {
-    const queued = await idbGet(QUEUE_KEY)
-    if (!queued) return
-    try {
-      const ref = await postSubmission(queued.form)
-      await idbDel(QUEUE_KEY)
-      setDone({ reference_no: ref, queued: false, docs: 'pending' })
-    } catch { /* still offline or server down — keep queued */ }
+  // Send a queued submission (form + stored document Files). Single-flight:
+  // concurrent triggers await the same promise; the token dedupes retries.
+  function flushQueue() {
+    if (flushInFlight) return flushInFlight
+    flushInFlight = (async () => {
+      const queued = await idbGet(QUEUE_KEY)
+      if (!queued) return
+      try {
+        let ref = queued.reference_no
+        if (!ref) {
+          if (flushedTokens.has(queued.token)) { await idbDel(QUEUE_KEY); return }
+          ref = await postSubmission(queued.form, queued.token)
+          flushedTokens.add(queued.token)
+          // persist the ref before uploading docs, so a failure mid-upload
+          // resumes with the same reference instead of re-posting the form
+          await idbSet(QUEUE_KEY, { ...queued, reference_no: ref })
+        }
+        const docs = await uploadDocs(ref, queued.files || {}, queued.form?.typhoid_expiry)
+        if (docs.failed.length > 0) {
+          // keep only the failed documents queued for the next reconnect
+          await idbSet(QUEUE_KEY, {
+            ...queued, reference_no: ref,
+            files: Object.fromEntries(docs.failed.map((t) => [t, queued.files[t]])),
+          })
+        } else {
+          await idbDel(QUEUE_KEY)
+        }
+        if (dirty.current) {
+          // never clobber a form being filled in — show a banner instead (FE-04)
+          setFlushed({ reference_no: ref, failed: docs.failed.length })
+        } else {
+          await idbDel(DRAFT_KEY)
+          setDone({ reference_no: ref, queued: false, docs: { ok: docs.ok, fail: docs.failed.length } })
+        }
+      } catch { /* still offline or server down — keep queued */ }
+    })().finally(() => { flushInFlight = null })
+    return flushInFlight
   }
 
-  async function postSubmission(payload) {
+  async function postSubmission(payload, token) {
     const res = await fetch('/api/register', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      // token travels with the payload as a dedupe/audit anchor
+      body: JSON.stringify({ ...payload, submission_token: token }),
     })
     const data = await res.json().catch(() => null)
     if (!res.ok) throw new Error(data?.detail || 'Submission failed')
     return data.reference_no
   }
 
-  async function uploadDocs(ref) {
-    let ok = 0, fail = 0
-    for (const [docType, file] of Object.entries(files)) {
+  async function uploadDocs(ref, fileMap, typhoidExpiry) {
+    let ok = 0
+    const failed = []
+    for (const [docType, file] of Object.entries(fileMap)) {
+      if (!file) continue
       const fd = new FormData()
       fd.append('file', file)
       let url = `/api/register/${ref}/documents/${docType}`
-      if (docType === 'typhoid_proof' && form.typhoid_expiry)
-        url += `?expiry_date=${form.typhoid_expiry}`
+      if (docType === 'typhoid_proof' && typhoidExpiry)
+        url += `?expiry_date=${typhoidExpiry}`
       try {
         const r = await fetch(url, { method: 'POST', body: fd })
-        r.ok ? ok++ : fail++
-      } catch { fail++ }
+        r.ok ? ok++ : failed.push(docType)
+      } catch { failed.push(docType) }
     }
-    return { ok, fail }
+    return { ok, failed }
   }
 
   function validate() {
@@ -139,14 +188,26 @@ export default function Register() {
     if (!validate()) { window.scrollTo({ top: 0, behavior: 'smooth' }); return }
     setBusy(true)
     const payload = { ...form }
+    const token = newToken()
     try {
-      const ref = await postSubmission(payload)
-      const docs = await uploadDocs(ref)
+      const ref = await postSubmission(payload, token)
+      flushedTokens.add(token)
+      const docs = await uploadDocs(ref, files, payload.typhoid_expiry)
+      if (docs.failed.length > 0) {
+        // form is in; queue the failed documents so reconnect re-sends them
+        await idbSet(QUEUE_KEY, {
+          token, form: payload, reference_no: ref, at: Date.now(),
+          files: Object.fromEntries(docs.failed.map((t) => [t, files[t]])),
+        })
+      }
       await idbDel(DRAFT_KEY)
-      setDone({ reference_no: ref, queued: false, docs })
+      dirty.current = false
+      setDone({ reference_no: ref, queued: false, docs: { ok: docs.ok, fail: docs.failed.length } })
     } catch (err) {
-      if (!navigator.onLine) {
-        await idbSet(QUEUE_KEY, { form: payload, at: Date.now() })
+      if (!navigator.onLine || isNetworkError(err)) {
+        // queue form AND files — File blobs store fine in IndexedDB (FE-03)
+        await idbSet(QUEUE_KEY, { token, form: payload, files, at: Date.now() })
+        dirty.current = false
         setDone({ queued: true })
       } else {
         setErrors({ _global: String(err.message || err) })
@@ -164,6 +225,10 @@ export default function Register() {
           <p className="text-sm text-slate-600 mt-2">
             Anda di luar talian. Borang anda telah disimpan dan akan dihantar secara
             automatik apabila talian pulih. Keep this page installed / open.
+          </p>
+          <p className="text-xs text-slate-500 mt-2">
+            Your form and attached documents are saved on this phone and will be
+            sent together. / Borang dan dokumen anda disimpan dan akan dihantar bersama.
           </p>
         </div>
       </Shell>
@@ -197,6 +262,12 @@ export default function Register() {
         <div className="mb-4 rounded-lg bg-amber-100 border border-amber-300 px-4 py-2 text-sm">
           Offline — your answers are being saved on this phone.
           / Luar talian — jawapan anda disimpan dalam telefon ini.
+        </div>
+      )}
+      {flushed && (
+        <div className="mb-4 rounded-lg bg-emerald-50 border border-emerald-300 px-4 py-2 text-sm text-emerald-800">
+          Your earlier registration was sent — ref <b className="font-mono">{flushed.reference_no}</b>.
+          {flushed.failed > 0 && ` ${flushed.failed} document(s) will retry when the connection improves.`}
         </div>
       )}
       {errors._global && (
@@ -255,7 +326,8 @@ export default function Register() {
           <Field label="Employment type" bm="Jenis pekerjaan">
             <div className="flex gap-3">
               {[['full_time', 'Full time'], ['part_time', 'Part time']].map(([v, l]) => (
-                <button type="button" key={v} onClick={() => setForm((f) => ({ ...f, employment_type: v }))}
+                <button type="button" key={v}
+                  onClick={() => { dirty.current = true; setForm((f) => ({ ...f, employment_type: v })) }}
                   className={'flex-1 rounded-lg border px-3 py-2.5 ' +
                     (form.employment_type === v ? 'bg-brand text-white border-brand' : 'bg-white border-slate-300')}>
                   {l}
@@ -314,7 +386,7 @@ export default function Register() {
             <Field key={key} label={en} bm={bm}>
               <input type="file" accept="image/*,.pdf" capture="environment"
                 className="block w-full text-sm file:mr-3 file:rounded-lg file:border-0 file:bg-brand file:text-white file:px-3 file:py-2"
-                onChange={(e) => setFiles((f) => ({ ...f, [key]: e.target.files[0] }))} />
+                onChange={(e) => { dirty.current = true; setFiles((f) => ({ ...f, [key]: e.target.files[0] })) }} />
               {files[key] && <span className="text-xs text-emerald-700">✓ {files[key].name}</span>}
             </Field>
           ))}

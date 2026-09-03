@@ -1,0 +1,4 @@
+/* Tailwind build-time entry — replaces the Play CDN script (FE-02). */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;

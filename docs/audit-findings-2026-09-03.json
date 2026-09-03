@@ -1,0 +1,843 @@
+{
+ "confirmed": [
+  {
+   "id": "STAT-01",
+   "title": "Live SOCSO employee rate is 0.5% \u2014 Settings default contradicts rates.py 1.25% (R3)",
+   "file": "backend/app/models.py",
+   "line": 37,
+   "severity": "critical",
+   "evidence": "models.py:37 `socso_c1_emp: Mapped[Decimal] = mapped_column(RATE, default=Decimal(\"0.005\"))` vs core/rates.py:14 `SOCSO_C1_EMP = Decimal(\"0.0125\")` (R3: employee 1.25% eff. 1 Jun 2026, Employer Circular 2/2026). All live compute paths use store.rate_config(db) (store.py:35-38), which builds RateConfig from the Settings row that get_settings() creates with the model default 0.005. Verified: RateConfig(socso_c1_emp=0.005) \u2192 SOCSO employee RM24.75 on a RM5,000 wage; DEFAULT_CONFIG \u2192 RM61.90. Every Category-1 employee in the running app is under-deducted 0.75pp of SOCSO, violating R3 and the \u00a71 core guarantee. Migration 0001 defines settings.socso_c1_emp NOT NULL with no default, so existing deployed rows also hold 0.005.",
+   "proposed_fix": "Decide the authoritative rate (per domain R3: 0.0125), change the Settings model default to Decimal(\"0.0125\"), and ship a data migration `update settings set socso_c1_emp = 0.0125 where socso_c1_emp = 0.005;`. Add a startup assertion (or test) that the Settings row's statutory rates match rates.py defaults unless deliberately overridden, and reconcile domain W1 which still encodes the 0.5% figure."
+  },
+  {
+   "id": "STAT-02",
+   "title": "Statutory self-test fails against current rates and is the engine's only guard",
+   "file": "backend/app/statutory.py",
+   "line": 116,
+   "severity": "high",
+   "evidence": "`assert (r.socso_employee, r.socso_employer) == (Decimal(\"24.75\"), Decimal(\"86.65\")), r` \u2014 running `python -m app.statutory` raises AssertionError: actual socso_employee=61.90, net_salary=4268.20 with DEFAULT_CONFIG (0.0125). Lines 116-118 (24.75 / 4305.35) encode the old 0.5% rate. There is no tests/ directory anywhere in backend/ (verified with find), so this failing __main__ block is the only executable check on the money engine \u2014 and domain L1 records that EPF/SOCSO already regressed once (git 587d436). CLAUDE.md mandates pytest tests for every function.",
+   "proposed_fix": "Update the expected figures to the current rates (socso_employee 61.90, total_employee_deduction 731.80, net 4268.20; keep employer 86.65 / cost 5746.55), then port W1\u2013W3 plus band-edge cases (RM30/50/70/100/140/200, RM5,000/5,000.01, RM6,000 ceiling, over_60, foreign) into backend/tests/test_statutory.py run in CI/Make, computing with both DEFAULT_CONFIG and a Settings-derived RateConfig."
+  },
+  {
+   "id": "STAT-03",
+   "title": "EPF uses RM20 bands for all wages; Third Schedule uses RM100 bands above RM5,000",
+   "file": "backend/app/core/kwsp.py",
+   "line": 16,
+   "severity": "high",
+   "evidence": "`BAND_WIDTH = Decimal(\"20\")` and band_upper() applies it to every wage. The official KWSP Third Schedule tabulates RM20 bands only up to RM5,000; above that the bands are RM100 wide (and above RM20,000 the rate applies to the exact wage). Verified: wage RM5,050 \u2192 code gives (557, 608); the official schedule row RM5,000.01\u20135,100 gives 11%\u00d75,100=561 / 12%\u00d75,100=612. EPF is understated for every employee earning over RM5,000 whose wage isn't at a RM100 band top. Domain R2's verification rows (RM2,550/3,350/5,000) are all \u2264 RM5,000, so the >5,000 region was never checked.",
+   "proposed_fix": "In band_upper(), use RM100 band width when wage > RM5,000 (band = ceil(w/100)*100) and, above RM20,000, apply the rate to the exact wage rounded up per the schedule. Verify against official rows above RM5,000 (e.g. RM5,050, RM7,777) and add them to the tests; update domain R2."
+  },
+  {
+   "id": "STAT-05",
+   "title": "Age-60 cutoff evaluated on the 1st of the run month, never re-derived, silently false without DOB",
+   "file": "backend/app/payroll.py",
+   "line": 63,
+   "severity": "medium",
+   "evidence": "`period = dt.date(run.year, run.month, 1); age = emp.age_on(period); ... over_60=bool(age is not None and age >= 60)`. An employee turning 60 on the 15th of the run month has age 59 on the 1st \u2192 charged Category 1 employee SOCSO plus EIS for that month, while PERKESO applies Category 2 (and stops EIS) from the month of the 60th birthday. models.py:143-147 age_on returns None when dob is missing \u2192 over_60 defaults False with no warning. The flag is derived once at slip creation and recompute()/run_save never re-derive it from dob (FLAG_FIELDS makes it manually flippable), so a dob correction leaves a stale category. This is exactly domain H4/OPEN-2.",
+   "proposed_fix": "Derive over_60 from age at month end (or explicitly: turns 60 at any point on/before the run month's last day \u2192 Category 2), re-derive it from Employee.dob inside run_save/recompute instead of trusting the stored flag, and surface a review warning when dob is missing for an employee with SOCSO/EIS enabled. Document the chosen cutoff in domain statutory.md (resolves OPEN-2)."
+  },
+  {
+   "id": "STAT-06",
+   "title": "SOCSO/EIS band table missing the 100\u2013140 and 140\u2013200 sub-bands",
+   "file": "backend/app/core/socso.py",
+   "line": 33,
+   "severity": "low",
+   "evidence": "`edges = [0, 30, 50, 70] + list(range(100, int(ceiling) + 1, 100))` treats RM100.01\u2013200 as one band with midpoint 150. The official PERKESO/EIS schedule has separate bands >RM100\u2013140 (assumed wage 120) and >RM140\u2013200 (assumed wage 170). Verified: band_midpoint(120) \u2192 150 (official 120, so a RM120 earner is over-deducted: 1.90 vs 1.50 employee) and band_midpoint(170) \u2192 150 (official 170, under-deducted). Only affects confirmed staff earning \u2264 RM200/month, so real exposure is small, but it is a band-edge defect of the H3 class.",
+   "proposed_fix": "Change the low-band edges to `[0, 30, 50, 70, 100, 140, 200]` before the RM100 bands starting at 200, and add band-edge tests at 100/100.01/140/140.01/200/200.01."
+  },
+  {
+   "id": "STAT-07",
+   "title": "Run population ignores blocker/verified-bank exclusion and the period window",
+   "file": "backend/app/payroll.py",
+   "line": 165,
+   "severity": "high",
+   "evidence": "sync_new_employees/available_employees select `Employee.active.is_(True)` only (payroll.py:165-167, 181-183). The blocked-from-payroll rule (runs-and-exports R2: open blocker flag or unverified bank \u2192 excluded) is enforced only in payroll_master_view (0004_views.sql:36-41) for the CSV, not in the payroll-run builder; and there is no hire_date/last_working_day window (R3), so a leaver from a prior month still marked active, or someone hired after period end, gets a full payslip. Worse, _new_payslip snapshots `bank_account=emp.bank_account` (payroll.py:67) \u2014 the raw employees column, not the verified bank_accounts row \u2014 so an unverified account can flow onto an approved payslip and the dashboard's by-bank payment totals, directly against the \u00a71 guarantee.",
+   "proposed_fix": "In sync_new_employees/available_employees/add_employee, apply the same predicate as payroll_master_view (status='active', no open blocker flag, verified bank account exists, hire_date \u2264 period end, last_working_day null or \u2265 period start) \u2014 e.g. select employee ids from payroll_master_view for the run's period \u2014 and snapshot bank details from the verified bank_accounts row. Surface excluded employees in the run UI as 'blocked from payroll'."
+  },
+  {
+   "id": "STAT-08",
+   "title": "No unique constraint on payslips (run_id, employee_id) \u2014 duplicate payslips possible",
+   "file": "backend/app/models.py",
+   "line": 200,
+   "severity": "medium",
+   "evidence": "Payslip defines only `run_id ... index=True` and `employee_id ... index=True`; migration 0001 creates plain indexes (lines 142-143), no UNIQUE. Duplicate protection is in-Python only: add_employee checks `any(s.employee_id == employee_id for s in run.payslips)` and sync_new_employees a `have` set before commit (payroll.py:151, 164). Two concurrent /sync or add-slip requests (or a retried request) can both pass the check and insert two payslips for the same employee \u2014 double pay in totals, exports and PDFs. This is hazard H3 (idempotency of run compute).",
+   "proposed_fix": "Add `UniqueConstraint(\"run_id\", \"employee_id\", name=\"uq_payslip_run_employee\")` to Payslip.__table_args__ plus a migration `create unique index ... on payslips (run_id, employee_id)` (dedupe first), and catch IntegrityError in add_employee/sync_new_employees to treat the duplicate as already-present."
+  },
+  {
+   "id": "STAT-09",
+   "title": "No proration for mid-month joiners/leavers; work_days_default never used in computation",
+   "file": "backend/app/payroll.py",
+   "line": 69,
+   "severity": "medium",
+   "evidence": "_new_payslip sets `basic=Decimal(\"0\") if is_part else (emp.basic_salary or 0)` \u2014 the full monthly basic regardless of hire_date or last_working_day inside the run month; statutory.compute has no proration path. `work_days_default` is stored on the run (payroll.py:140-141) but never read by any calculation, so a joiner on the 20th or a leaver on the 5th is paid a full month unless the clerk manually notices and flips count_by_day with hand-keyed units. Runs-and-exports H1 names month-boundary proration a confirmed hazard; nothing in the engine or run builder addresses it.",
+   "proposed_fix": "When hire_date or last_working_day falls inside the run month, default the slip to count_by_day with units = worked days (per the company's chosen convention, e.g. calendar-day or work_days_default proportion) and rate = basic/work_days_default, and flag the slip for review. At minimum, warn on slips whose employee has a mid-month hire/LWD."
+  },
+  {
+   "id": "STAT-10",
+   "title": "Movements view labels every leaver 'hire_and_leave' \u2014 classification ignores dates' month",
+   "file": "supabase/migrations/0004_views.sql",
+   "line": 66,
+   "severity": "medium",
+   "evidence": "`case when e.hire_date is not null and e.last_working_day is not null then 'hire_and_leave' when e.last_working_day is not null then 'leaver' else 'new_hire' end` \u2014 the movement type tests only NULL-ness. Every employee has a hire_date on record, so any leaver (hired years ago, LWD this month) is exported as 'hire_and_leave'; 'leaver' is only reachable when hire_date is NULL. The movements CSV (payroll_export.py:53-67) filters rows to the month but passes this mislabel straight to the clerk who uses it for final-pay handling.",
+   "proposed_fix": "Classify per exported month: since the endpoint knows year/month, compute movement in the query (hire_date within month AND lwd within month \u2192 'hire_and_leave'; only lwd within month \u2192 'leaver'; only hire_date within month \u2192 'new_hire'), or expose both dates and derive the label in payroll_export.py instead of the view."
+  },
+  {
+   "id": "STAT-13",
+   "title": "Money inputs accept negatives and silently coerce garbage to 0",
+   "file": "backend/app/main.py",
+   "line": 53,
+   "severity": "medium",
+   "evidence": "`def _dec(raw, default=\"0\"): try: return Decimal(str(raw)...) except (InvalidOperation, AttributeError): return Decimal(default)` \u2014 invalid input becomes 0 with no 422, and negative values pass through. run_save (main.py:270-278) writes these directly into basic/rate/units/allowance/deduction/ot_hours/ot_rate/pcb_override and recomputes: a posted negative allowance or negative pcb_override silently distorts net salary and statutory wage; a typo like '1,2o0' becomes RM0 basic and zeroes the whole payslip without any error. CLAUDE.md mandates input validation; this is a \u00a76 money path.",
+   "proposed_fix": "In run_save, reject non-parseable values with 422 (don't default to 0) and enforce field-appropriate ranges: basic/rate/units/allowance/ot_hours/ot_rate/pcb_override \u2265 0, deduction \u2265 0, with sensible upper bounds. Return per-field errors so the UI can highlight the offending cell."
+  },
+  {
+   "id": "STAT-11",
+   "title": "Payslip PDF omits the LINDUNG deduction line while its total includes it",
+   "file": "backend/app/pdf.py",
+   "line": 91,
+   "severity": "low",
+   "evidence": "pdf.py:91-96 itemizes only EPF/SOCSO/EIS/PCB and the 'other' deduction, but recompute (payroll.py:46-48) does `slip.total_employee_deduction += slip.lindung_amount; slip.net_salary -= slip.lindung_amount`. As soon as an admin sets a non-zero lindung_24jam_rate for an opted-in employee, the printed 'Total deductions' will not equal the sum of the listed rows and net won't reconcile on the employee-facing document. Latent today only because the default rate is RM0.",
+   "proposed_fix": "In payslip_pdf, append `(\"LINDUNG 24Jam\", slip.lindung_amount)` to the deductions list when slip.lindung_optin and lindung_amount > 0 (and add the column to run_summary_pdf if material)."
+  },
+  {
+   "id": "STAT-12",
+   "title": "default_include_allowance / default_include_ot settings are dead \u2014 hardcoded True/False override them",
+   "file": "backend/app/payroll.py",
+   "line": 74,
+   "severity": "low",
+   "evidence": "_new_payslip hardcodes `include_allowance=True, include_ot=False` (payroll.py:74-75) and run_save re-forces `slip.include_allowance = True; slip.include_ot = False` on every save (main.py:294-295). Yet Settings.default_include_allowance/default_include_ot are exposed in the admin settings API (serializers.py:14, main.py:423) \u2014 grep shows no other reader. An admin toggling statutory-wage composition (rule R1's opt-in) sees the setting saved but it has zero effect, misleading on a money-relevant control.",
+   "proposed_fix": "Either wire the two settings into _new_payslip/run_save in place of the hardcoded values, or (if 'basic + allowance always, OT never' is fixed company policy per the code comments) remove them from SETTINGS_FIELDS/SETTING_KINDS and the UI, and record the policy as a DECISION in the domain file."
+  },
+  {
+   "id": "STAT-14",
+   "title": "Preparer can edit payslip figures while the run is pending approval",
+   "file": "backend/app/models.py",
+   "line": 192,
+   "severity": "low",
+   "evidence": "editable_by: `if self.status == \"pending\": return bool(user and (user.can_approve or user.can_prepare))` \u2014 run_save (main.py:261) therefore lets the preparer keep changing amounts after submitting for approval, with no re-submission or approver-visible change marker; the approver may approve figures that changed since they started reviewing. The docstring ('Preparer edits draft/rejected; approver may also edit while pending') reads as approver-only for pending.",
+   "proposed_fix": "Restrict pending-state edits to approvers (`return bool(user and user.can_approve)`), or force any pending-state edit to bounce the run back to draft/require re-submission, so approval always covers the exact stored figures."
+  },
+  {
+   "id": "STAT-15",
+   "title": "Payroll tables store Numeric(12,2) ringgit, contradicting the confirmed integer-sen storage rule",
+   "file": "backend/app/models.py",
+   "line": 15,
+   "severity": "low",
+   "evidence": "`MONEY = Numeric(12, 2)` and every payslip/settings money column in migration 0001 is NUMERIC(12,2) ringgit, while PROJECT_PROFILE \u00a73 and runs-and-exports R4 [confirmed] state 'Money stored as integer sen; views/exports convert at the edge' \u2014 only the employee-master tables (0002: basic_salary_sen integer) follow it. NUMERIC(12,2) is still exact (no float hazard; the sen views cast `(e.basic_salary * 100)::integer` correctly), but the codebase now has two money conventions and the documented rule is false for the entire payroll engine's persistence.",
+   "proposed_fix": "Either migrate payslip/settings money columns to integer sen with edge conversion (large change; schedule outside the month-end window), or amend R4/PROJECT_PROFILE to state the actual rule ('exact NUMERIC(12,2) ringgit in payroll tables, integer sen in employee-master and export views') so future agents don't 'fix' code against a wrong rule."
+  },
+  {
+   "id": "SEC-01",
+   "title": "Forgeable sessions: hardcoded default session-signing secret with no production guard",
+   "file": "backend/app/config.py",
+   "line": 16,
+   "severity": "critical",
+   "evidence": "config.py:16 `SECRET_KEY = os.environ.get(\"PAYROLL_SECRET\", \"onni-payroll-dev-secret-change-me\")`; docker-compose.yml:22 `PAYROLL_SECRET: ${PAYROLL_SECRET:-change-me-in-production}`; main.py:29 `app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, max_age=60 * 60 * 12)`. Starlette SessionMiddleware cookies are itsdangerous-signed client-side tokens. With the publicly known default secret (it is in the git repo), anyone who can reach the API can mint a cookie containing {\"user_id\": <admin id>} and become admin without credentials \u2014 full access to NRIC, bank accounts, salaries, and run approval. Nothing refuses to boot when the default secret is in use.",
+   "proposed_fix": "Fail fast at startup when PAYROLL_SECRET is unset or equals a known default (e.g. in config.py: raise RuntimeError unless APP_ENV=development). Remove the compose fallback default so `docker compose up` without a .env refuses to start rather than running with a forgeable key. Rotate the secret on any deployed instance."
+  },
+  {
+   "id": "SEC-02",
+   "title": "payroll_master_view (NRIC, bank account, salary) likely readable via Supabase anon key \u2014 RLS bypassed by security-definer views created after the revoke",
+   "file": "supabase/migrations/0004_views.sql",
+   "line": 8,
+   "severity": "critical",
+   "evidence": "0003_rls.sql:25 revokes only what existed then: `revoke all on all tables in schema public from anon, authenticated;`. 0004_views.sql then does `create or replace view payroll_master_view as select ... e.nric as identity_no, ... (e.basic_salary * 100)::integer as basic_salary_sen, ... ba.bank_name, ba.account_no ...` with no revoke/grant statements and no `security_invoker`. On Supabase, ALTER DEFAULT PRIVILEGES grants SELECT on newly created objects in `public` to anon/authenticated, and Postgres views default to security-definer semantics (run as the view owner), so the tables' RLS does not apply through the view. Result: the PostgREST anon key can read every active employee's NRIC, salary, and verified bank account. supabase/rls_test.sql (lines 6-20) only tests base tables, never the three views, so the gap is invisible to the existing 'RLS proof'.",
+   "proposed_fix": "Add a migration: `alter view payroll_master_view set (security_invoker = true);` (same for payroll_blocked_view, payroll_movements_view), plus `revoke all on payroll_master_view, payroll_blocked_view, payroll_movements_view from anon, authenticated;` and consider `alter default privileges in schema public revoke select on tables from anon, authenticated;` so future objects are safe. Extend supabase/rls_test.sql to select from all three views as anon/authenticated and require 0 rows / permission denied."
+  },
+  {
+   "id": "SEC-03",
+   "title": "Default weak credentials (admin/admin123) force-reset on every container start, no password change path, no login rate limiting",
+   "file": "backend/app/config.py",
+   "line": 20,
+   "severity": "high",
+   "evidence": "config.py:20-30 seeds `\"password\": os.environ.get(\"ADMIN_PASS\", \"admin123\")` (and preparer123/approver123). backend/Dockerfile:12 `CMD [\"sh\", \"-c\", \"python seed.py && uvicorn ...\"]` runs seed.py on every start, and seed.py:75-84 `seed_users` OVERWRITES the stored hash: `user.password_hash = hash_password(spec[\"password\"])` \u2014 so even a manually changed password reverts on restart; there is no change-password endpoint anywhere in the API. Makefile:8 prints the credentials: `@echo \"Demo accounts: preparer/preparer123 \u00b7 approver/approver123 \u00b7 admin/admin123\"`. main.py:71-79 login has no rate limiting, lockout, or delay, so the three fixed usernames are trivially brute-forceable even with changed passwords.",
+   "proposed_fix": "Require *_PASS env vars (refuse to boot with defaults outside dev), make seed_users create-if-missing only (never overwrite an existing hash), add a password-change endpoint, and add per-IP/per-username throttling (e.g. slowapi) plus a constant-time failure delay on /api/auth/login. Remove credentials from Makefile output."
+  },
+  {
+   "id": "SEC-04",
+   "title": "Anonymous IDOR: predictable reference numbers let anyone overwrite documents of any employee, including active staff",
+   "file": "backend/app/registration.py",
+   "line": 171,
+   "severity": "high",
+   "evidence": "registration.py:171-181 `/api/register/{ref}/documents/{doc_type}` is unauthenticated and only checks `select employee_id from application_submissions where reference_no = :r` \u2014 with no check that the employee is still an applicant. Legacy imports create fully predictable refs (import_legacy_form.py:268 `ref = f\"GF-{r:03d}\"`, i.e. GF-001, GF-002 \u2026) that map to now-ACTIVE employees. storage.py:41 uploads with `\"x-upsert\": \"true\"`, so an anonymous attacker can permanently overwrite an active employee's stored NRIC/work-permit/food-handler images at `applicants/<ref>/<doc_type>.<ext>` and insert unlimited employee_documents rows (no cap, no rate limit, rows accumulate per upload at line 202-205), poisoning what HR later verifies via signed URLs.",
+   "proposed_fix": "In upload_document, reject when the linked employee's status is not in ('applicant','pending_review') and when the submission is older than a short window (e.g. 48h); cap documents per reference; drop x-upsert (or store under a server-generated random object name per upload); add per-IP rate limiting. Consider invalidating GF-* refs for uploads entirely since those applicants were imported, not PWA-registered."
+  },
+  {
+   "id": "SEC-05",
+   "title": "Preparer can activate employees and change bank accounts, bypassing HR blocker/verified-bank gates, with zero audit",
+   "file": "backend/app/main.py",
+   "line": 144,
+   "severity": "high",
+   "evidence": "main.py employee_save (123-162): `for f in (\"bank_name\", \"bank_account\", \"email\", \"phone\", \"nric\", ...): setattr(emp, f, ...)` and `for f in (..., \"active\", ...): setattr(emp, f, bool(body.get(f)))` \u2014 a `preparer` can set an arbitrary bank_account and `active=True` in one call; employee_toggle (165-173) flips `emp.active = not emp.active`. Neither path checks open blocker flags or a verified bank account (hr.py approve, lines 186-196, enforces both), neither raises an `unverified_bank_account` flag on bank change, and neither writes to audit_log (the `_audit` helper exists only in hr.py). This directly enables the \u00a71 violation 'a payment to an unverified bank account' \u2014 silently, by the lowest-privileged role.",
+   "proposed_fix": "In employee_save/employee_toggle: forbid setting active=True unless the hr.approve gates pass (or delegate activation exclusively to POST /api/hr/employees/{id}/approve); on any bank_name/bank_account/nric change, mark the bank unverified and insert an `unverified_bank_account` blocker flag; write audit_log rows (actor, changed fields) for every employee mutation in main.py, mirroring hr.py's _audit."
+  },
+  {
+   "id": "SEC-06",
+   "title": "No audit trail for payroll-run lifecycle; runs are hard-deletable and admins can self-approve their own runs",
+   "file": "backend/app/main.py",
+   "line": 357,
+   "severity": "high",
+   "evidence": "None of run_create/run_save/run_submit/run_approve/run_reject/run_delete writes to audit_log (grep: `_audit` is used only in hr.py). run_delete (main.py:357-365) does `db.delete(run); db.commit()` on any draft/pending/rejected run \u2014 the run and all payslips vanish with no record of who deleted what (cascade `all, delete-orphan` in models.py:168-169). run_approve (332-342) never compares `user.username` to `run.prepared_by`, so an admin (can_prepare and can_approve, models.py:69-74) can create, edit, submit and approve the same run alone. \u00a71 requires 'an auditable trail' for pay runs; a wrong or fraudulent run can currently be created, approved, exported and then deleted without trace.",
+   "proposed_fix": "Insert audit_log rows for every run state transition and for slip edits (actor, run id, action, before/after status); replace hard delete with a soft-deleted/cancelled status (or at minimum audit-log the deletion with totals snapshot); reject approval when `run.prepared_by == user.username` unless a second approver exists (log a DECISION if the single-admin business reality requires allowing it)."
+  },
+  {
+   "id": "SEC-07",
+   "title": "Session cookie not hardened: no Secure flag, no server-side invalidation, no rotation on login",
+   "file": "backend/app/main.py",
+   "line": 29,
+   "severity": "medium",
+   "evidence": "main.py:29 `app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, max_age=60 * 60 * 12)` uses Starlette defaults: `https_only=False` (cookie sent over plain HTTP \u2014 the stack serves plain HTTP on :8077 per docker-compose.yml:33 and nginx.conf:2) and same_site defaults to 'lax'. Sessions are stateless signed cookies: logout (main.py:83-85 `request.session.clear()`) only clears the browser copy \u2014 a stolen/copied cookie remains valid for the full 12h with no server-side revocation, and login (line 78) does not rotate any session identifier.",
+   "proposed_fix": "Terminate TLS and set `https_only=True, same_site=\"strict\"` on SessionMiddleware; add a server-side session token (e.g. random session id stored on the User row or a sessions table) checked in current_user so logout and password change actually invalidate sessions; issue a fresh session on login."
+  },
+  {
+   "id": "SEC-08",
+   "title": "Hardcoded real Google Sheet ID of a link-shared spreadsheet containing live applicant PII",
+   "file": "backend/app/hr.py",
+   "line": 308,
+   "severity": "high",
+   "evidence": "hr.py:308-309 `GOOGLE_SHEET_ID = __import__(\"os\").environ.get(\"GOOGLE_SHEET_ID\", \"1uQxJ4Pa6YIc6bIz01WB5bBUU78V6nvtSIIU5Jv5oE_A\")` and line 324 builds `https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=xlsx`. The error message at line 329 (\"check link sharing is on\") confirms the sheet is meant to be link-shared, i.e. readable by anyone with the URL. Anyone with read access to this repo (or the Docker image, which contains app/) can download the entire live registration sheet \u2014 names, NRIC, bank accounts, phones \u2014 without touching the app at all. This is a new leak channel beyond the already-flagged tracked xlsx files.",
+   "proposed_fix": "Remove the hardcoded ID (default to empty and 404/501 when unset); move access to a service-account-authenticated Sheets API or turn off link sharing and proxy through the backend; rotate/retire the exposed sheet (treat the current ID as compromised and re-share to specific accounts only)."
+  },
+  {
+   "id": "SEC-09",
+   "title": "Real employee PII baked into the backend Docker image and hardcoded in seed.py source",
+   "file": "backend/Dockerfile",
+   "line": 9,
+   "severity": "medium",
+   "evidence": "backend/Dockerfile:9 `COPY seed.py import_legacy_form.py employee-registration-form.xlsx ./` bakes the real legacy registration workbook (NRIC, bank accounts, phones) into every built image layer \u2014 anyone with pull access to the image/registry gets the PII, independent of the git-tracked-files issue already flagged. Additionally seed.py:29-36 hardcodes 12 real employee full names in source (`ACTIVE_ROSTER = [\"cheong fong cheng\", \"tan kui thean\", ...]`, `EPF_ROSTER = [...]`).",
+   "proposed_fix": "Stop COPYing the xlsx into the image; mount it at runtime (compose volume) or fetch from a secured location only during an explicit one-off import job. Replace the hardcoded name rosters with configuration loaded from the database or an untracked env/config file; scrub existing image layers/registries that contain the workbook."
+  },
+  {
+   "id": "SEC-10",
+   "title": "seed.py force-resets every employee's active flag from a hardcoded roster on every container restart, overriding HR lifecycle decisions",
+   "file": "backend/seed.py",
+   "line": 116,
+   "severity": "high",
+   "evidence": "backend/Dockerfile:12 runs seed.py on every start; seed.py main() calls `configure_roster(db)` even when employees already exist (line 115-116: `print(f\"Employees already present...\"); configure_roster(db)`), and configure_roster (lines 60-66) does `emp.active = key in active; emp.inactive_reason = None if emp.active else \"resigned\"; emp.epf_enabled = key in epf` for EVERY employee. Any employee HR activated through the gated approve flow who is not in the 12-name hardcoded list is silently deactivated (unpaid) on the next restart, and anyone on the list is force-reactivated even if HR terminated them \u2014 an unauthorized, unaudited mass state change to the exact field that gates who gets paid (\u00a76.3).",
+   "proposed_fix": "Make configure_roster run only on first import (inside the `count == 0` branch) or behind an explicit `--apply-roster` flag, never on routine startup; long term delete the hardcoded roster entirely and drive `active`/`epf_enabled` solely from the HR lifecycle endpoints, with audit_log entries for any bulk change."
+  },
+  {
+   "id": "SEC-11",
+   "title": "Upload validation trusts client-declared Content-Type only \u2014 no magic-byte verification",
+   "file": "backend/app/registration.py",
+   "line": 185,
+   "severity": "medium",
+   "evidence": "registration.py:185-186 `if (file.content_type or \"\") not in ALLOWED_MIME: raise HTTPException(422, ...)` and lines 195-196 pick the stored extension from the same client header. The bytes are never inspected, so any payload (HTML/JS polyglot, executable, oversized decompression-bomb PDF) can be stored as `image/jpeg` in the employee-docs bucket and is later served to HR reviewers' browsers via storage.signed_url (hr.py:114) with the attacker-chosen content type.",
+   "proposed_fix": "Validate magic bytes server-side (e.g. `filetype`/Pillow verify for images, `%PDF-` header for PDFs) and reject mismatches; re-encode images where feasible; ensure Supabase serves the bucket objects with `Content-Disposition: attachment` and `X-Content-Type-Options: nosniff`."
+  },
+  {
+   "id": "SEC-12",
+   "title": "No security headers on the UI/nginx layer",
+   "file": "ui/nginx.conf",
+   "line": 1,
+   "severity": "low",
+   "evidence": "ui/nginx.conf (entire file, lines 1-31) sets no `X-Content-Type-Options: nosniff`, no `X-Frame-Options`/`frame-ancestors` CSP (clickjacking of the approve/verify buttons), no `Referrer-Policy`, no HSTS, and no CSP for the SPA that renders PII. The FastAPI app adds no security-header middleware either.",
+   "proposed_fix": "Add to the server block: `add_header X-Content-Type-Options nosniff always; add_header X-Frame-Options DENY always; add_header Referrer-Policy no-referrer always;` plus a baseline CSP (`default-src 'self'`) and HSTS once TLS is in place. Note nginx `add_header` inheritance: headers must be repeated in locations that declare their own add_header (e.g. /sw.js)."
+  },
+  {
+   "id": "SEC-13",
+   "title": "Public registration endpoint has no rate limiting/anti-automation and a racy emp_code generator",
+   "file": "backend/app/registration.py",
+   "line": 62,
+   "severity": "low",
+   "evidence": "registration.py:62 `@router.post(\"\")` is anonymous by design but has no rate limit, CAPTCHA, or per-IP quota \u2014 a script can create unbounded employees/application_submissions/hr_review_flags rows, burying the real HR queue (availability of the review workflow). emp_code assignment at lines 117-118 uses `select 'ONNI' || lpad((coalesce(max(substring(emp_code from '\\d+')::int),0)+1)...` \u2014 a non-atomic read-then-insert that collides under concurrent submissions against the unique emp_code index, turning legitimate concurrent registrations into 500s.",
+   "proposed_fix": "Add per-IP rate limiting (nginx `limit_req` on /api/register or slowapi in FastAPI) and a lightweight abuse control (honeypot field or CAPTCHA). Generate emp_code from a Postgres sequence (or retry-on-conflict loop) instead of max()+1."
+  },
+  {
+   "id": "SEC-14",
+   "title": "PII masking helper exists but is never applied \u2014 full NRIC/bank numbers returned everywhere, including raw submission payloads",
+   "file": "backend/app/hr.py",
+   "line": 49,
+   "severity": "low",
+   "evidence": "hr.py:49-52 defines `_mask(value, keep=4)` but it has zero call sites: detail() returns `\"nric\": emp.nric` (line 101), `\"bank_account\": emp.bank_account` (line 111), full `bank_accounts.account_no` rows (lines 83-85), and the verbatim registration `payload` JSON (lines 93-96, 119) which duplicates identity and bank numbers. serializers.employee_dict (serializers.py:44-60) likewise returns full nric/bank_account/salary to every authenticated role via GET /api/employees (main.py:97, require_user). Screens that only need to confirm 'last 4 digits' still receive the full RESTRICTED values, widening exposure in browser memory, devtools, and any future logging.",
+   "proposed_fix": "Apply `_mask` to nric/account_no in list/queue responses and in the submissions payload echo, returning full values only on the single HR detail view that needs them (or behind an explicit `?reveal=1` that is audit-logged); trim employee_dict for the general list endpoint to exclude nric/bank_account."
+  },
+  {
+   "id": "INFRA-01",
+   "title": "Every container boot re-runs seed.py against the default (prod Supabase) DB, resetting passwords and rewriting the employee roster",
+   "file": "backend/Dockerfile",
+   "line": 12,
+   "severity": "critical",
+   "evidence": "backend/Dockerfile:12: `CMD [\"sh\", \"-c\", \"python seed.py && uvicorn app.main:app ...\"]` \u2014 seed runs on EVERY start, in every environment. docker-compose.yml:21 defaults DATABASE_URL to prod Supabase via .env (run.md: \"By default the backend connects to Supabase using DATABASE_URL in .env\"). seed.py:75-87 `seed_users` overwrites existing users' `password_hash` with config.py defaults (preparer123/approver123/admin123, config.py:20-30); seed.py:113 and :116 call `configure_roster(db)` in BOTH branches (even when employees already exist), which sets `emp.active`, `emp.inactive_reason`, `emp.epf_enabled` for ALL employees from a hardcoded name list (seed.py:29-36) and forces `s.ft_default_epf = False; s.pt_default_epf = False`. A routine `make up` therefore mutates production master data that gates who gets paid and whose EPF is computed (\u00a71 core guarantee, \u00a76.3), and resets prod credentials to publicly documented demo passwords (printed by Makefile:8).",
+   "proposed_fix": "Remove seeding from the image CMD (`CMD [\"uvicorn\", \"app.main:app\", ...]`). Move seeding to an explicit one-shot compose service or `make seed` gated to the dev profile / `APP_ENV=development`. In seed.py: never overwrite an existing user's password_hash; drop `configure_roster` from the boot path entirely (roster changes belong in the HR UI or a deliberate script run with confirmation)."
+  },
+  {
+   "id": "INFRA-02",
+   "title": "Default `docker compose up` targets prod Supabase; db is behind an opt-in profile and the contract's dev/test/prod profiles do not exist",
+   "file": "docker-compose.yml",
+   "line": 4,
+   "severity": "critical",
+   "evidence": "docker-compose.yml:4: `profiles: [\"local-db\"]        # only started with: docker compose --profile local-db up` and :20-21: `# From .env \u2014 points at Supabase; falls back to the local db service.` The skill contract requires profiles `dev`, `test`, `prod` with dev the seeded/synthetic default and prod explicit (SKILL.md Compose contract). Here the polarity is inverted: the documented everyday path (`make up`, Makefile:5; run.md Quick start) hits the production database, while the local DB is opt-in. Worse, with no `.env` present (none exists in the repo), the fallback URL `@db:5432` points at a service that never starts, so the default boot either hits prod or hangs 30s and crashes (seed.py:43-52 wait_for_db).",
+   "proposed_fix": "Restructure to contract profiles: `dev` (local db + synthetic seed + exposed ports) as the default `make up`; `test` (ephemeral db, runs suite, exits); `prod` (explicit `--profile prod`, no seeds, DATABASE_URL required with no fallback). Remove the Supabase-by-default wiring so reaching prod requires a deliberate flag plus explicit env."
+  },
+  {
+   "id": "INFRA-03",
+   "title": "No migrate service: supabase/migrations are applied manually with psql, and the local-db profile never applies them \u2014 backend startup crashes on `raise_expiry_flags()`",
+   "file": "docker-compose.yml",
+   "line": 1,
+   "severity": "high",
+   "evidence": "docker-compose.yml has services db/backend/ui only \u2014 no `migrate` service (contract: migrations \"applied by a migrate service before the app starts\"). README.md:54-55: \"applied with psql -f\" (manual). The local `db` service mounts no init scripts, so a fresh `make up-local-db` has none of supabase/migrations applied; yet backend/app/main.py:47-50 runs unguarded at startup: `if not DATABASE_URL_IS_SQLITE: db.execute(_text(\"select raise_expiry_flags()\"))` \u2014 that function exists only in supabase/migrations/0005_status_lifecycle.sql:70, so the backend container crashes on local Postgres. Result: the only working boot path is prod Supabase, and local schema (from create_all) diverges from prod schema (RLS, views, functions from 0003-0008).",
+   "proposed_fix": "Add a one-shot `migrate` service (psql image) that applies supabase/migrations/*.sql in order against $DATABASE_URL, with `depends_on: db: condition: service_healthy`; make backend `depends_on` migrate `service_completed_successfully`. Add `make migrate`. Until then, at minimum guard the `raise_expiry_flags()` call or fail with a clear \"migrations not applied\" error."
+  },
+  {
+   "id": "INFRA-04",
+   "title": "App code creates tables: Base.metadata.create_all runs at every app startup and in seed.py, competing with supabase/migrations as schema source",
+   "file": "backend/app/database.py",
+   "line": 35,
+   "severity": "high",
+   "evidence": "backend/app/database.py:31-35: `def init_db() ... Base.metadata.create_all(bind=engine)`, invoked from backend/app/main.py:37 (`@app.on_event(\"startup\") ... init_db()`) and backend/seed.py:96. The infra contract names this an anti-pattern (\"app code that creates tables\"; \"Migrations are the schema. No CREATE TABLE IF NOT EXISTS in app code\"). Because the default DATABASE_URL is prod Supabase (INFRA-02), any ORM-model drift is silently materialised as new tables/columns-missing tables in production, bypassing the reviewed supabase/migrations and their RLS policies (0003_rls.sql) \u2014 new app-created tables have no RLS at all.",
+   "proposed_fix": "Delete `init_db()` from the FastAPI startup handler and from seed.py. Schema changes ship only as supabase/migrations applied by the migrate service (INFRA-03). If tests need fast schema setup, scope create_all to a pytest fixture that only accepts a test-profile DSN."
+  },
+  {
+   "id": "INFRA-05",
+   "title": "`make clean` runs `docker compose down -v`, casually wiping the pgdata volume \u2014 forbidden without a human DECISION",
+   "file": "Makefile",
+   "line": 23,
+   "severity": "high",
+   "evidence": "Makefile:21-23: `# Stop containers and wipe the local db volume\\nclean:\\n\\tdocker compose down -v`. SKILL.md Compose contract: \"`docker compose down` must not lose data; only `down -v` does, and that is never run by an agent without a human DECISION.\" Exposing it as an innocuously named everyday target (`clean` usually means build artifacts) invites an agent or human to destroy the only copy of local payroll data (7-year LHDN retention, \u00a78) with one command.",
+   "proposed_fix": "Remove the `-v` from `clean` (or delete the target). If a volume-wipe target must exist, name it `nuke-local-db`, require an explicit confirmation variable (e.g. `CONFIRM=yes`), and document that running it requires a logged DECISION."
+  },
+  {
+   "id": "INFRA-06",
+   "title": "Makefile lacks the contract targets: no `test`, `migrate`, `psql`, `backup`, `restore`; `up` lacks `--wait`; no backup story for a PROD-critical payroll DB",
+   "file": "Makefile",
+   "line": 1,
+   "severity": "high",
+   "evidence": "Makefile:1: `.PHONY: up up-local-db down clean logs` \u2014 that is the complete target list. SKILL.md Agent procedure step 1 mandates `Makefile (up, down, test, migrate, psql, backup, restore)`; \"`make up` \u2192 `docker compose --profile dev up -d --wait`. `make test` runs the test profile. Both are the pre-checks the judge runs.\" Persistence rule 4: \"Backups exist before prod. Nightly pg_dump ... restore rehearsed.\" None exist; the only \"backups\" are ad-hoc dumps committed inside the repo (backups/pre-migration-20260802.sql), which is a location on/inside the host and also leaks prod data into git.",
+   "proposed_fix": "Add `make test` (test profile: ephemeral db + migrations + pytest), `make migrate` (runs the migrate service), `make psql` (docker compose exec db psql), `make backup`/`make restore` (pg_dump/pg_restore round-trip, target path outside the repo). Change `up` to `docker compose --profile dev up -d --build --wait`. Remove the committed dump files from the repo."
+  },
+  {
+   "id": "INFRA-07",
+   "title": ".env.example is absent although .env is required for the app to boot at all",
+   "file": ".env.example",
+   "severity": "high",
+   "evidence": "No `.env.example` exists anywhere in the repo (root listing has no env file at all). Yet run.md:70-71: \"Supabase connection details (DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_KEY) live in .env at the repo root\", and docker-compose.yml:21-26 consumes DATABASE_URL, PAYROLL_SECRET, PAYROLL_COMPANY, SUPABASE_URL, SUPABASE_SERVICE_KEY. Contract: \"Config: .env (gitignored) + .env.example (committed, every key documented)\"; user CLAUDE.md PART 2 also mandates a documented .env.example. A fresh checkout cannot boot: without .env, backend falls back to `@db:5432` (never started by default) and dies after wait_for_db retries.",
+   "proposed_fix": "Commit `.env.example` documenting every key with safe placeholder values: DATABASE_URL, PAYROLL_SECRET, PAYROLL_COMPANY, SUPABASE_URL, SUPABASE_SERVICE_KEY, and the seed-user override vars (PREPARER_USER/PASS, APPROVER_USER/PASS, ADMIN_USER/PASS from backend/app/config.py:20-30). Reference it from run.md setup steps."
+  },
+  {
+   "id": "INFRA-08",
+   "title": "Seeds are real production data, not synthetic: real-employee xlsx baked into the Docker image and real names hardcoded in seed.py; .gitignore does not exclude the PII files",
+   "file": "backend/seed.py",
+   "line": 29,
+   "severity": "high",
+   "evidence": "seed.py:29-36 hardcodes real employee names: `ACTIVE_ROSTER = [\"cheong fong cheng\", \"tan kui thean\", ...]` / `EPF_ROSTER = [...]`. backend/Dockerfile:9: `COPY seed.py import_legacy_form.py employee-registration-form.xlsx ./` bakes the real registration workbook (NRIC, bank accounts, phones \u2014 \u00a77 RESTRICTED) into every built image, from which it can be extracted by anyone with image access. Contract persistence rule 6: \"Seeds are synthetic. dev seeds come from scripts/seed_*; never a production dump.\" Git additionally tracks emp_payroll_2605/2606.xlsx, `employee-registration-form (1).xlsx`, backend/employee-registration-form.xlsx, 2607/*.xlsx, backups/pre-migration-20260802.sql, webapp/payroll.db (the \u00a77 known-open violation), and .gitignore:144-145 leaves the xlsx rule commented out: `# Excel files (optional...)\\n# *.xlsx`.",
+   "proposed_fix": "Create `scripts/seed_dev.py` generating synthetic employees (fake NRIC/bank/names) for the dev profile; delete the xlsx COPY from backend/Dockerfile and drive real imports only via an explicit, documented operator command with the file mounted at runtime. Uncomment/add `*.xlsx`, `*.xls`, `*.db`, `backups/` to .gitignore and purge the tracked PII files from git history (git filter-repo), per the open SECURITY-FLAG."
+  },
+  {
+   "id": "INFRA-09",
+   "title": "backend and ui services have no healthcheck, no restart policy, and no service_healthy dependencies; /api/health checks nothing",
+   "file": "docker-compose.yml",
+   "line": 17,
+   "severity": "medium",
+   "evidence": "docker-compose.yml:17-35: only `db` has a healthcheck; `backend` and `ui` have none, no service has `restart: unless-stopped`, and `ui` uses bare `depends_on: - backend` (no `condition: service_healthy` \u2014 impossible anyway since backend defines no healthcheck). Contract: \"Every service has healthcheck, restart: unless-stopped, and depends_on with condition: service_healthy.\" The app relies on seed.py's wait_for_db loop instead of orchestrated ordering. backend/app/main.py:65-67 `@app.get(\"/api/health\") ... return {\"ok\": True}` \u2014 it never touches the DB and omits status/version/timestamp required by the API conventions (user CLAUDE.md PART 3), so it would report healthy while the database is down.",
+   "proposed_fix": "Add healthchecks: backend `curl -f http://localhost:8000/api/health`, ui `wget -qO- http://localhost/`. Add `restart: unless-stopped` to all services; `depends_on: {backend: {condition: service_healthy}}` for ui and `{db: {condition: service_healthy}}`/migrate for backend. Extend the health handler to execute `SELECT 1` and return `{status, version, timestamp}`."
+  },
+  {
+   "id": "INFRA-10",
+   "title": "Both images run as root, backend image is single-stage, and no image is pinned by digest",
+   "file": "backend/Dockerfile",
+   "line": 1,
+   "severity": "medium",
+   "evidence": "backend/Dockerfile has no `USER` directive (whole file, lines 1-12) \u2014 uvicorn runs as root with \u00a77 payroll data in reach; it is also single-stage. ui/Dockerfile:10 `FROM nginx:1.27-alpine` likewise has no USER (nginx master runs as root). Images are tag-pinned only: `python:3.12-slim`, `node:20-alpine`, `nginx:1.27-alpine`, `postgres:16-alpine` (docker-compose.yml:3) \u2014 contract: \"Images pinned by tag *and* digest for prod; the app image built from a multi-stage Dockerfile running as a non-root user.\"",
+   "proposed_fix": "backend: multi-stage build (builder installs wheels; runtime stage `adduser --system app` + `USER app`). ui: switch to `nginxinc/nginx-unprivileged:1.27-alpine` (listen 8080). Pin all FROM lines and the compose db image with `@sha256:` digests for the prod profile."
+  },
+  {
+   "id": "INFRA-11",
+   "title": "Silent SQLite fallback in config.py for a payroll API \u2014 data would land in an untracked local file / container layer",
+   "file": "backend/app/config.py",
+   "line": 12,
+   "severity": "medium",
+   "evidence": "backend/app/config.py:12-14: `DATABASE_URL = os.environ.get(\"DATABASE_URL\", f\"sqlite:///{BASE_DIR / 'payroll.db'}\")`. Contract: \"SQLite is acceptable only for a CLI-only surface, and only by DECISION\"; anti-pattern list includes \"state in a container's writable layer\". If the env var is ever missing (host run, typo in .env key), the API silently starts against a file DB \u2014 payroll runs, approvals, and the audit trail get written somewhere that is not backed up and vanishes on image rebuild, breaking \u00a71's auditable-trail guarantee. It also forces sqlite branching through the codebase (main.py:19 `DATABASE_URL_IS_SQLITE`, database.py:12).",
+   "proposed_fix": "Fail fast: raise at import/startup if DATABASE_URL is unset, unless an explicit opt-in like `APP_ENV=dev-sqlite` is set (and log a loud warning). Log the decision per the SQLite exception rule if the dev fallback is kept at all; remove the sqlite special-casing once dropped."
+  },
+  {
+   "id": "INFRA-12",
+   "title": "Default secrets shipped in compose and config: forgeable session key and hardcoded DB password",
+   "file": "docker-compose.yml",
+   "line": 22,
+   "severity": "medium",
+   "evidence": "docker-compose.yml:22: `PAYROLL_SECRET: ${PAYROLL_SECRET:-change-me-in-production}` and :8 `POSTGRES_PASSWORD: payroll` hardcoded; backend/app/config.py:16: `SECRET_KEY = os.environ.get(\"PAYROLL_SECRET\", \"onni-payroll-dev-secret-change-me\")`. Contract: \"secrets never in compose.yaml\"; security gate: \"secrets via .env/vault only\". SECRET_KEY signs the session cookie (main.py:29 SessionMiddleware) \u2014 a deployment that forgets to set PAYROLL_SECRET runs with a public, guessable key, letting anyone forge an admin session on a system holding \u00a77 RESTRICTED data. Demo user passwords also default in config.py:20-30 and are printed by `make up` (Makefile:8) while pointed at prod.",
+   "proposed_fix": "Remove the secret defaults: require PAYROLL_SECRET from the environment and refuse to start (outside the dev profile) when it is unset or equals a known default. Move POSTGRES_PASSWORD to .env. Gate seed-user creation to the dev profile so demo credentials can never exist in a prod DB."
+  },
+  {
+   "id": "INFRA-13",
+   "title": "ui image build ignores the committed package-lock.json (`npm install` on package.json only) \u2014 unreproducible dependency tree",
+   "file": "ui/Dockerfile",
+   "line": 3,
+   "severity": "low",
+   "evidence": "ui/Dockerfile:3-4: `COPY package.json ./` then `RUN npm install` \u2014 ui/package-lock.json exists in the repo but is never copied, so every image build re-resolves semver ranges and can pull different (potentially compromised) versions than were reviewed, undermining the pinning intent of the contract's image/dependency rules.",
+   "proposed_fix": "Change to `COPY package.json package-lock.json ./` and `RUN npm ci` for deterministic, lockfile-exact builds."
+  },
+  {
+   "id": "DL-01",
+   "title": "Payroll run path pays from the boolean `active` flag and unverified employees.bank_account, bypassing the entire verification/blocker model",
+   "file": "backend/app/payroll.py",
+   "line": 166,
+   "severity": "critical",
+   "evidence": "payroll.py sync_new_employees/available_employees select payees with only `select(Employee).where(Employee.active.is_(True))` (lines 166, 182) \u2014 no check of status='active', open blocker flags, or a verified bank account. `_new_payslip` snapshots `bank_name=emp.bank_name, bank_account=emp.bank_account` (lines 66-67) from the legacy employees columns, not the `bank_accounts` table where the `verified` workflow lives. Meanwhile main.py lets any preparer flip the flag with no lifecycle check: `emp.active = not emp.active` (main.py:171), set it on create via `setattr(emp, f, bool(body.get(f)))` for \"active\" (main.py:148-150), and silently edit `bank_account`/`nric` (main.py:144-145) with no verification reset. INSERTs also bypass the DB guard entirely because trg_employees_status is `before update of status` only (0005:52-54) \u2014 seed.py/importer.py create active=True rows still in status 'applicant'. Domain R2 (blocked/unverified employees excluded from payroll) is enforced only in payroll_master_view, which the run builder never uses. Violates \u00a71 directly: \"a payment to an unverified bank account violates the guarantee\".",
+   "proposed_fix": "Make payroll eligibility derive from the master model: in sync_new_employees/available_employees require status='active', no open blocker flags, and an existing verified bank account (reuse the payroll_master_view predicate); snapshot bank details from the latest verified bank_accounts row, refusing to add an employee without one. Remove `active` from the employee_save writable set and delete /api/employees/{id}/toggle (or make it call the HR lifecycle endpoints); add an INSERT trigger (or CHECK) keeping `active = (status='active')`."
+  },
+  {
+   "id": "DL-02",
+   "title": "Session-scoped `set onni.bypass_lifecycle='1'` leaks into the connection pool, disabling status-transition enforcement for all later requests",
+   "file": "backend/import_legacy_form.py",
+   "line": 251,
+   "severity": "critical",
+   "evidence": "import_worksheet runs `db.execute(text(\"set onni.bypass_lifecycle = '1'\"))` (line 251) \u2014 plain SET, not SET LOCAL \u2014 and is called from the live endpoint POST /api/hr/sync-google-sheet with the request session (hr.py:336). The GUC is never RESET; SQLAlchemy's pool reset-on-return (rollback) does not clear session GUCs, so after one sheet sync the pooled connection permanently satisfies `current_setting('onni.bypass_lifecycle', true) = '1'` in check_status_transition (0005:26), and every subsequent request served on that connection skips transition validation and the resigned/terminated required-date checks. Lifecycle enforcement (lifecycle.md R1, \u00a76.3 activation gate) is silently off for a random subset of traffic.",
+   "proposed_fix": "Use a transaction-scoped setting: `SELECT set_config('onni.bypass_lifecycle','1', true)` (or `SET LOCAL`) inside the import transaction, and/or `RESET onni.bypass_lifecycle` in a finally block. Better: run the sheet sync on a dedicated short-lived connection, not the pooled request session."
+  },
+  {
+   "id": "DL-03",
+   "title": "HR approve accepts status 'applicant' but the DB trigger forbids applicant\u2192active \u2014 activation 500s for every payroll-UI-created or seeded employee",
+   "file": "backend/app/hr.py",
+   "line": 183,
+   "severity": "high",
+   "evidence": "hr.py approve: `if emp.status not in (\"applicant\", \"pending_review\"): raise ...` (line 183) then inserts a status-history row 'active'; apply_status_history updates employees.status, firing check_status_transition where the allowed set from 'applicant' is only `('pending_review','rejected')` (0005:31). So approving an applicant raises `invalid status transition applicant -> active` \u2192 unhandled 500. Every employee created by POST /api/employees (main.py never sets status \u2192 model default 'applicant', models.py:117) or by seed.py/importer.py sits in 'applicant' and appears in the HR queue (hr.py:64 queries both statuses) but cannot be activated \u2014 except when the DL-02 GUC leak happens to be active, making behavior nondeterministic.",
+   "proposed_fix": "Pick one contract and enforce it both places: either allow applicant\u2192active in check_status_transition, or have the approve endpoint first insert a 'pending_review' history row for applicants before the 'active' row (and update the trigger comment/lifecycle.md R1 accordingly). Add a test that approves an 'applicant'-status employee against Postgres."
+  },
+  {
+   "id": "DL-04",
+   "title": "audit_log is written only by the HR router \u2014 zero audit on payroll \u00a76 actions (run approve/reject, payslip edits, statutory settings, bank/salary edits, exports)",
+   "file": "backend/app/main.py",
+   "line": 332,
+   "severity": "high",
+   "evidence": "grep shows all `_audit(...)` call sites live in hr.py only. main.py mutations write nothing to audit_log: run_approve (line 332-342), run_reject, run_submit, run_delete, run_save (payslip money edits), settings_save (EPF/SOCSO/EIS/PCB rates \u2014 line 444-462), employee_save (bank_account/NRIC/salary \u2014 line 123-162), employee_toggle (line 165). payroll_export.py master/movements CSV downloads (the feed for actual bank payments, \u00a76.4) are also unaudited. \u00a71 requires \"an auditable trail\"; today a preparer can change a bank account and an approver can approve a run with no audit_log row.",
+   "proposed_fix": "Move `_audit` into a shared module (e.g. app/audit.py) and call it from every \u00a76 mutation: employee create/edit/toggle (with changed_fields), run submit/approve/reject/delete, run_save (slip ids changed), settings_save (fields changed), and payroll-export downloads (action='export', entity='payroll_master', entity_id='YYYY-MM'). Keep values out \u2014 field names and ids only, as _audit already does."
+  },
+  {
+   "id": "DL-05",
+   "title": "Re-running the sheet sync deletes ALL satellite rows for matched employees \u2014 including HR-verified bank accounts, PWA-uploaded documents, and the append-only status history",
+   "file": "backend/import_legacy_form.py",
+   "line": 355,
+   "severity": "high",
+   "evidence": "For every non-settled employee the import wipes indiscriminately: `for tbl in (\"bank_accounts\", \"emergency_contacts\", \"employee_documents\"): db.execute(text(f\"delete from {tbl} where employee_id = :eid\"))` (lines 355-356) \u2014 unlike flags, which are filtered `raised_by = 'import'` (line 357). It then also runs `delete from employee_status_history where employee_id = :eid` (line 361). A bank account HR verified while the employee was still pending_review (verification is a precondition of approval, so it normally happens in this status) is destroyed and re-inserted verified=false; PWA-uploaded document rows (storage_path references) are dropped; and the append-only history mandated by lifecycle.md R1/R5 (\"History append-only\") is erased. POST /api/hr/sync-google-sheet makes this a routine button, not a one-shot.",
+   "proposed_fix": "Add a source/raised_by discriminator to bank_accounts, emergency_contacts and employee_documents (e.g. `source text default 'import'`) and delete only `source='import'` rows, mirroring the flags handling; never delete employee_status_history \u2014 insert a new row only when target_status differs from the current latest. Preserve `verified=true` bank rows unconditionally."
+  },
+  {
+   "id": "DL-06",
+   "title": "Seed importer silently 'fixes' float-corrupted NRIC/bank cells, raises no flags, and activates employees \u2014 violating the zero-silent-fixes rule",
+   "file": "backend/app/importer.py",
+   "line": 95,
+   "severity": "high",
+   "evidence": "importer.py `_clean`: `if isinstance(value, float) and value.is_integer(): return str(int(value))` (lines 95-96) is applied to nric and bank_account cells (lines 147-148) \u2014 a spreadsheet cell that went numeric (lost leading zero, float-precision-mangled 15-16 digit account) is stored as-is with no hr_review_flags row, directly contradicting lifecycle.md R6 (\"every recovery/guess raises a flag \u2014 zero silent fixes\") and H2 (\"15\u201316-digit values at float precision are always blocker-flagged\"). Each row is then created `active=True` (line 154) with no HR review, and via DL-01 those bank digits flow onto payslips. import_employees is also non-idempotent: it appends every row on each call (only seed.py's count==0 check guards it), and emp_code `f\"ONNI{seq:04d}\"` seeded from `count(*)` (line 125) collides with existing codes after any deletion.",
+   "proposed_fix": "Route seeding through import_legacy_form.import_worksheet (which has the recovery+flag logic and GF-<row> idempotency) and delete importer.py's duplicate path; at minimum, make _clean flag float-sourced nric/bank values as blockers, create employees inactive/pending_review, and key rows on reg_ref for idempotent re-runs."
+  },
+  {
+   "id": "DL-07",
+   "title": "Two schema sources: startup create_all vs SQL migrations \u2014 fresh-Postgres boot fails on missing enum types, SQLite fallback lacks all 9 master tables",
+   "file": "backend/app/database.py",
+   "line": 31,
+   "severity": "medium",
+   "evidence": "main.py startup calls init_db() (main.py:37) \u2192 `Base.metadata.create_all(bind=engine)` (database.py:35) unconditionally, including against prod Postgres. Employee.status/identity_type use `postgresql.ENUM(..., create_type=False)` (models.py:113-123), so on a fresh Postgres where migrations haven't run, CREATE TABLE employees references types employment_status/identity_type that don't exist and startup crashes \u2014 there is no migrate step in compose (\u00a710 gap). Conversely on the SQLite dev fallback create_all builds only the 5 model tables; hr_review_flags, bank_accounts, application_submissions, audit_log etc. exist solely in supabase/migrations, so every /api/hr, /api/register and /api/payroll-export endpoint 500s (their raw SQL is also Postgres-only: `::text`, `on conflict`, `now()`).",
+   "proposed_fix": "Declare migrations the single schema source for Postgres: run create_all only when DATABASE_URL_IS_SQLITE, and add a migrate step (psql loop over supabase/migrations, or a compose `migrate` service) that runs before the API starts. Either give the master tables SQLAlchemy models + SQLite-compatible SQL, or explicitly disable the hr/registration/export routers on SQLite instead of letting them 500."
+  },
+  {
+   "id": "DL-08",
+   "title": "pay_profiles (integer sen, the declared master pay record) is write-only \u2014 payroll and the master CSV read salary from legacy employees.basic_salary instead",
+   "file": "supabase/migrations/0004_views.sql",
+   "line": 19,
+   "severity": "medium",
+   "evidence": "payroll_master_view exposes `(e.basic_salary * 100)::integer as basic_salary_sen, (e.hourly_rate * 100)::integer as hourly_rate_sen` (0004:19-20) \u2014 legacy RM columns \u2014 while pay_profiles.basic_salary_sen written at approval (hr.py:225-234) is only consulted for ot_eligible/epf_no. After activation there is no endpoint that updates pay_profiles (approve is one-shot; effective_to is never closed), but main.py employee_save freely rewrites employees.basic_salary (main.py:141) with no audit and run_save even back-fills it from a payslip (main.py:297-298). Result: two divergent salary records, with the HR-approved sen value inert and the unaudited RM value feeding both the payroll run and the bank-payment CSV.",
+   "proposed_fix": "Pick employees.basic_salary/hourly_rate as the single operational pay source and drop the pay_profiles columns from the flow (or vice versa): if pay_profiles stays authoritative, change the view to `coalesce(pp.basic_salary_sen, (e.basic_salary*100)::integer)`, add an HR pay-change endpoint that closes the old row (effective_to) and inserts a new one with an audit_log entry, and make employee_save reject direct salary edits for status='active' employees."
+  },
+  {
+   "id": "DL-09",
+   "title": "Money-representation rule drift: RM NUMERIC(12,2) storage (float on SQLite) and float round-trips in the sen conversion on the approval path",
+   "file": "backend/app/models.py",
+   "line": 15,
+   "severity": "medium",
+   "evidence": "PROJECT_PROFILE \u00a73 / runs-and-exports R4: \"Money is integer sen in the DB \u2026 never floats for storage or math.\" models.py stores all payslip/employee/settings money as `MONEY = Numeric(12, 2)` RM (models.py:15) \u2014 on the sanctioned SQLite dev fallback SQLAlchemy persists Numeric as REAL (float storage), and migrate_sqlite.py then copies those floats into Postgres. hr.py approve converts money through float: `\"b\": int(round(float(basic or emp.basic_salary or 0) * 100)) or None` (hr.py:230-231) \u2014 a float in a \u00a76 money path; also `or None` turns a legitimate 0 into NULL, tripping the pay_profiles CHECK for a zero-salary monthly profile.",
+   "proposed_fix": "Convert via Decimal on the approval path: `int((Decimal(str(basic)) * 100).quantize(Decimal('1')))`, and treat 0 explicitly instead of `or None`. Document a DECISION that the payslip tables intentionally stay NUMERIC(12,2) RM (contradicting \u00a73) or plan the sen migration; forbid float in any sen conversion via a lint/test."
+  },
+  {
+   "id": "DL-10",
+   "title": "raise_expiry_flags never escalates an expired typhoid cert to blocker while the earlier 'typhoid_expiring' warning is still open",
+   "file": "supabase/migrations/0005_status_lifecycle.sql",
+   "line": 85,
+   "severity": "medium",
+   "evidence": "The dedup predicate for the typhoid insert excludes both flag types: `and not exists (... f.flag_type in ('typhoid_expiring','typhoid_expired') and (f.details->>'doc_id')::bigint = d.id)` (0005:85-88). Sequence: 25 days before expiry a 'typhoid_expiring' warning is raised; when the cert actually expires, the open warning suppresses the 'typhoid_expired' blocker insert, so the employee is never blocked from payroll_master_view and keeps handling food with an expired KKM-mandatory cert until HR happens to resolve the warning.",
+   "proposed_fix": "Split the dedup per resulting flag_type (`f.flag_type = case when d.expiry_date < current_date then 'typhoid_expired' else 'typhoid_expiring' end`), and auto-resolve the open 'typhoid_expiring' warning when inserting the 'typhoid_expired' blocker for the same doc_id."
+  },
+  {
+   "id": "DL-11",
+   "title": "payroll_movements_view classifies every leaver as 'hire_and_leave' \u2014 movement labels ignore the reporting period",
+   "file": "supabase/migrations/0004_views.sql",
+   "line": 66,
+   "severity": "medium",
+   "evidence": "`case when e.hire_date is not null and e.last_working_day is not null then 'hire_and_leave' when e.last_working_day is not null then 'leaver' else 'new_hire' end` (0004:66-70). Activation always sets hire_date (hr.py:217), so any employee resigning later has both dates and is exported as 'hire_and_leave' in the movements CSV (payroll_export.py:56-66) even when hired years earlier; 'leaver' is unreachable for normally-activated staff. The movements CSV drives the clerk's final-pay handling (runs-and-exports R3/H1), so the mislabel invites wrong month-boundary treatment.",
+   "proposed_fix": "Compute movement in the export query where the period is known, e.g. new_hire = hire_date within [month), leaver = last_working_day within [month), hire_and_leave = both within the same month; keep the view exposing raw dates only (drop its movement column) so the label can't be computed without a period."
+  },
+  {
+   "id": "DL-12",
+   "title": "Hardcoded live Google Sheet ID (source of real NRIC/bank data) committed as the in-code default",
+   "file": "backend/app/hr.py",
+   "line": 309,
+   "severity": "medium",
+   "evidence": "`GOOGLE_SHEET_ID = __import__(\"os\").environ.get(\"GOOGLE_SHEET_ID\", \"1uQxJ4Pa6YIc6bIz01WB5bBUU78V6nvtSIIU5Jv5oE_A\")` (hr.py:308-309) with the fetch requiring link-sharing to be on (hr.py:324-329). The sheet holds \u00a77 RESTRICTED data (NRIC, bank accounts, DOB, salary expectations); committing the ID of a link-shared sheet to the repo makes the entire applicant dataset downloadable by anyone who reads the code \u2014 compounding the already-flagged real-data-in-git violation. ACTIVE_ROSTER real employee names are likewise hardcoded (import_legacy_form.py:38-43, seed.py:29-34).",
+   "proposed_fix": "Remove the default: require GOOGLE_SHEET_ID from the environment and 404/501 when unset; rotate the sheet (new ID, sharing restricted to a service account). Move the active roster out of code into data (a DB column or an ops-provided file) so real names stop shipping in the repo."
+  },
+  {
+   "id": "DL-13",
+   "title": "Concurrent registrations race on MAX()-based emp_code generation \u2014 duplicate ONNI codes crash the public submit endpoint",
+   "file": "backend/app/registration.py",
+   "line": 117,
+   "severity": "low",
+   "evidence": "`select 'ONNI' || lpad((coalesce(max(substring(emp_code from '\\d+')::int),0)+1)::text, 4, '0') from employees` (registration.py:117-118, duplicated in import_legacy_form.py:312-313). Two concurrent anonymous submissions read the same max and both insert the same emp_code; ix_employees_emp_code is unique, so the second applicant gets an unhandled IntegrityError 500 and their submission (including uploaded-doc reference) is lost. Traffic is low but this is the public PWA path.",
+   "proposed_fix": "Allocate codes from a Postgres sequence (`create sequence onni_emp_code_seq`; `'ONNI' || lpad(nextval(...)::text, 4, '0')`), or retry on unique violation. Share one helper between registration.py and import_legacy_form.py."
+  },
+  {
+   "id": "DL-14",
+   "title": "audit_log has no indexes and no tamper protection; duplicate-detection columns unindexed",
+   "file": "supabase/migrations/0002_employee_master.sql",
+   "line": 151,
+   "severity": "low",
+   "evidence": "audit_log (0002:151-159) is created with only its PK \u2014 no index on (entity, entity_id) or created_at, so per-employee audit lookups are seq scans; nothing prevents UPDATE/DELETE on it (RLS locks out anon keys, but the backend/owner connection can rewrite history \u2014 the trail \u00a71 relies on is not append-only at the DB level). The registration duplicate check filters on employees.nric / lower(email) / phone (registration.py:108-112) with no supporting indexes. Impact is small at ~200 employees, hence low.",
+   "proposed_fix": "Add `create index on audit_log (entity, entity_id)` and `(created_at)`; enforce append-only with `create rule` / trigger raising on UPDATE/DELETE (or revoke UPDATE/DELETE from the app role). Add indexes on employees (nric), (lower(email)), (phone) for the dup check."
+  },
+  {
+   "id": "DL-15",
+   "title": "Naive local timestamps and TIMESTAMP WITHOUT TIME ZONE on payroll approval fields, against the \u00a78 timestamptz rule",
+   "file": "backend/app/main.py",
+   "line": 327,
+   "severity": "low",
+   "evidence": "run_submit/run_approve stamp `dt.datetime.now()` (main.py:327, 340) \u2014 naive container-local time \u2014 into columns defined `TIMESTAMP WITHOUT TIME ZONE` (0001:43-45); models.py likewise uses `DateTime` without timezone for users/employees/payroll_runs created_at (e.g. models.py:66, 139, 164). PROJECT_PROFILE \u00a78 mandates `timestamptz` with Asia/Kuala_Lumpur; approval times on the irreversible \u00a76.2 path are ambiguous (UTC container vs KL) and will mislead month-end-window audits by 8 hours.",
+   "proposed_fix": "Use `dt.datetime.now(dt.timezone.utc)` in the app, change the model columns to `DateTime(timezone=True)`, and add a migration altering payroll_runs/users/employees timestamp columns to timestamptz (values interpreted as UTC)."
+  },
+  {
+   "id": "DL-16",
+   "title": "migrate_sqlite.py wipe-and-replace fails or orphans master data on any target that has satellite rows",
+   "file": "backend/migrate_sqlite.py",
+   "line": 30,
+   "severity": "low",
+   "evidence": "The script deletes payslips\u2192runs\u2192employees\u2192users\u2192settings (`for model in reversed(MODELS): dst.execute(delete(model))`, lines 30-31) but knows nothing of the 9 master tables: any bank_accounts/hr_review_flags/application_submissions rows referencing employees make `delete(employees)` fail with an FK violation, so the tool is unusable once master data exists \u2014 and if it ever succeeded (empty satellites) it would still bulk-insert employees with arbitrary status values, bypassing the lifecycle trigger (insert-path gap, see DL-01). It also wipes payroll history, in tension with \u00a78's 7-year retention if pointed at a live target.",
+   "proposed_fix": "Guard the script: refuse to run if the target has rows in any master-data table (or any payslips), print what would be destroyed, and require an explicit --force. Document it as bootstrap-only in the module docstring and README."
+  },
+  {
+   "id": "QT-01",
+   "title": "Statutory engine's only regression guard (self-test) fails on current code and is never executed",
+   "file": "backend/app/statutory.py",
+   "line": 116,
+   "severity": "critical",
+   "evidence": "The `if __name__ == \"__main__\":` self-test asserts `(r.socso_employee, r.socso_employer) == (Decimal(\"24.75\"), Decimal(\"86.65\"))` and `r.net_salary == Decimal(\"4305.35\")`. Running `python -m app.statutory` today raises AssertionError: actual `socso_employee=Decimal('61.90')`, `net_salary=Decimal('4268.20')`. Commit 587d436 changed SOCSO_C1_EMP from 0.005 to 0.0125 in core/rates.py but never updated these assertions, and nothing (no CI, no Makefile target, no pytest) ever runs this block, so the sole guard on the money engine has been silently red for a month. Domain lesson L1 in .claude/domain/payroll/statutory.md explicitly records: statutory logic 'has no automated tests guarding it today'. Note the domain doc's own W1 row (SOCSO 24.75/86.65) is also stale relative to R3 (employee 1.25%).",
+   "proposed_fix": "Move the self-test into pytest golden tests (tests/test_statutory.py) with expected figures recomputed under the current legislated rates (employee 1.25% per PERKESO Circular 2/2026), delete the __main__ block (or keep it delegating to pytest), wire `pytest` into the Makefile and CI so the guard actually runs, and update W1 in .claude/domain/payroll/statutory.md to match."
+  },
+  {
+   "id": "QT-02",
+   "title": "SOCSO employee rate duplicated in Settings ORM default (0.005) and diverged from engine constant (0.0125) \u2014 live compute path uses the stale rate",
+   "file": "backend/app/models.py",
+   "line": 37,
+   "severity": "critical",
+   "evidence": "models.py: `socso_c1_emp: Mapped[Decimal] = mapped_column(RATE, default=Decimal(\"0.005\"))` while core/rates.py has `SOCSO_C1_EMP = Decimal(\"0.0125\")`. Every live computation goes through `store.rate_config(db)` (main.py run_save/add_slip/sync call it), which builds RateConfig from the Settings row \u2014 so any Settings row created by `store.get_settings()` computes SOCSO employee share at 0.5%, not the legislated 1.25% (domain R3, effective 1 Jun 2026). No migration in supabase/migrations/ updates existing rows either (grep for socso_c1_emp only hits the 0001 column definition). The 'Fix EPF and SOCSO' commit 587d436 changed only core/rates.py, so the fix never reached the DB-driven live path \u2014 a wrong statutory figure directly violating the \u00a71 core guarantee, caused by the same rate being defined in two unlinked places.",
+   "proposed_fix": "Make Settings defaults derive from the engine constants (e.g. `default=rates.SOCSO_C1_EMP` for every shared field) so there is one source of truth; ship a data migration/seed step updating existing settings rows (`update settings set socso_c1_emp = 0.0125 where socso_c1_emp = 0.005`); add a unit test asserting `RateConfig()` equals a RateConfig built from a freshly-defaulted Settings row."
+  },
+  {
+   "id": "QT-03",
+   "title": "No test suite exists anywhere in the live app \u2014 every \u00a76 high-risk path is unguarded",
+   "file": "backend/app/statutory.py",
+   "line": 113,
+   "severity": "high",
+   "evidence": "`find` shows zero test_*.py, conftest.py, pytest.ini or tests/ directories outside webapp/ (which has none either). The user's global standard mandates pytest tests mirroring src with 80% coverage; the domain files define exact scenarios that must be locked down (statutory.md W1\u2013W3, H1\u2013H6; runs-and-exports.md H1\u2013H3) and L1 records that EPF/SOCSO already regressed once. Required suites, none of which exist: (1) tests/core/test_kwsp.py \u2014 band_upper RM20 edges (5000.00 vs 5000.01), employer 13%\u219212% threshold flip, roundup_ringgit (H2); (2) tests/core/test_socso.py \u2014 W1 golden, exclusive-lower band edges RM30/50/70/100 (H3), RM6,000 ceiling, over_60 Category 2, documented H1 5-sen tie cases; (3) tests/core/test_eis.py \u2014 foreign-worker and age-60 exclusion (R4/H5); (4) tests/core/test_pcb.py \u2014 rebate edge at CI=35,000, zero-CI, pcb_override precedence (H6); (5) tests/test_statutory.py \u2014 W1\u2013W3 goldens, include_allowance/include_ot combinations, R7 net/employer-cost identities; (6) tests/test_payroll.py \u2014 recompute + lindung deduction, run lifecycle draft\u2192pending\u2192approved\u2192locked, idempotent add/sync (runs H3); (7) tests/test_rbac.py \u2014 require_preparer/approver/admin and PayrollRun.editable_by state matrix; (8) tests/test_hr_activation.py \u2014 approve blocked on open blocker flags, unverified bank, missing position/salary (activation gate); (9) tests/test_exports.py \u2014 master CSV excludes blocked employees, month-boundary joins/leavers windows (runs H1), sen\u2192RM conversion; (10) tests/test_registration.py \u2014 NRIC/phone/bank validation, duplicate detection flag, upload size/MIME limits.",
+   "proposed_fix": "Create tests/ mirroring backend/app with the ten suites above (pytest, markers per standard, DB-backed suites against the compose Postgres with migrations applied), enforce 80% coverage via pytest-cov, and gate `make up`/CI on them. Prioritize (1)\u2013(5) \u2014 pure functions, no DB needed \u2014 in the first pass since they guard the core guarantee directly."
+  },
+  {
+   "id": "QT-04",
+   "title": "No pyproject.toml, lint/type/test config, dev dependencies, or CI \u2014 and ruff/mypy currently fail",
+   "file": "Makefile",
+   "line": 1,
+   "severity": "high",
+   "evidence": "Repo root and backend/ contain no pyproject.toml, setup.py/cfg, pytest.ini, ruff/black/mypy config, and no .github/ CI; backend/requirements.txt lists only runtime deps (fastapi, sqlalchemy, \u2026) with no pytest/ruff/black/mypy; the Makefile has only up/down/clean/logs targets. Running the mandated checks fails: `ruff check backend` \u2192 10 errors (F401 unused imports in app/hr.py:10 `json`, app/security.py:13 `select`, app/statutory.py:16 `round5, roundup_ringgit`, import_legacy_form.py:30 `Session`; E402 in app/main.py:20-25 caused by `DATABASE_URL_IS_SQLITE` being assigned mid-import-block at main.py:19); `mypy app --ignore-missing-imports` \u2192 11 errors in 3 files (e.g. payroll.py:34 Decimal|int arg-type, hr.py:147 Result.rowcount attr-defined). The global standard requires black/ruff/mypy clean before completion.",
+   "proposed_fix": "Add a root (or backend/) pyproject.toml declaring the package, [tool.black] line-length 88, [tool.ruff] (isort profile black), [tool.mypy], [tool.pytest.ini_options] with coverage; add dev extras (pytest, pytest-cov, ruff, black, mypy, httpx test client); fix the 10 ruff and 11 mypy errors (delete unused imports, move the DATABASE_URL_IS_SQLITE line below the import block); add `make test`/`make lint` and a CI workflow running black --check, ruff, mypy, pytest."
+  },
+  {
+   "id": "QT-05",
+   "title": "Dead settings: default_include_allowance / default_include_ot are stored and admin-editable but never read by any code path",
+   "file": "backend/app/models.py",
+   "line": 47,
+   "severity": "medium",
+   "evidence": "Settings defines `default_include_allowance` / `default_include_ot`, main.py SETTING_KINDS exposes them for admin editing and serializers.py returns them, but grep shows no consumer: payroll.py hardcodes `include_allowance=True, include_ot=False` in _new_payslip (lines 74-75) and main.py run_save re-hardcodes `slip.include_allowance = True; slip.include_ot = False` (lines 294-295). An admin toggling these statutory-wage-composition settings (domain R1: allowance/OT attract statutory only when opted in) sees no effect \u2014 misleading dead configuration on a money path.",
+   "proposed_fix": "Either wire the settings through (_new_payslip and run_save read them from the Settings row instead of hardcoding) or delete the two columns from Settings, SETTING_KINDS, SETTINGS_FIELDS and the UI, documenting that statutory base is fixed at basic+allowance. Add a test pinning whichever behavior is chosen."
+  },
+  {
+   "id": "QT-06",
+   "title": "Zero logging in the entire backend; startup errors swallowed by silent broad excepts; print() used in operational scripts",
+   "file": "backend/app/main.py",
+   "line": 45,
+   "severity": "medium",
+   "evidence": "grep finds no `import logging`/`getLogger` anywhere under backend/. main.py _startup wraps `storage.ensure_bucket()` in `except Exception:\\n        pass` \u2014 a failed/misconfigured document bucket (RESTRICTED PDPA documents) is silently ignored with no trace. importer.py:32 uses broad `except Exception: return None` where `decimal.InvalidOperation` is the specific failure. Operational scripts (seed.py, migrate_sqlite.py, import_legacy_form.py \u2014 14 call sites) report via print() only. The global standard mandates the logging module and specific exception types.",
+   "proposed_fix": "Add `logger = logging.getLogger(__name__)` per module; in _startup catch `httpx.HTTPError` and log at warning with the failure reason; in importer._to_number catch `decimal.InvalidOperation, ValueError`; convert script print() calls to logging with a basicConfig in each __main__ entry."
+  },
+  {
+   "id": "QT-07",
+   "title": "All mutation endpoints take untyped `body: dict = Body(...)` \u2014 no Pydantic validation on money-critical inputs, malformed input yields 500s",
+   "file": "backend/app/main.py",
+   "line": 201,
+   "severity": "medium",
+   "evidence": "Every POST/PUT in main.py, hr.py and registration.py declares `body: dict = Body(...)`. run_create does `year, month = int(body[\"year\"]), int(body[\"month\"])` \u2014 a missing key raises KeyError \u2192 500 instead of 422, and month=13 is accepted, creating an unusable run (`period_label` then raises IndexError on MONTHS[13] in every subsequent /api/runs listing, breaking the runs page). run_save's slips loop does `int(s[\"id\"])` similarly. `dict` bodies are implicit Any, violating the mandatory-type-hints standard, and no bounds exist on payroll figures (negative basic, month 0).",
+   "proposed_fix": "Define Pydantic request models (RunCreate with year: int = Field(ge=2020), month: int = Field(ge=1, le=12); SlipUpdate; EmployeeSave; ApproveBody; RegistrationBody) so FastAPI returns 422 with field detail automatically; validate ranges on all money/units fields."
+  },
+  {
+   "id": "QT-08",
+   "title": "HR activation path converts money via float and coerces zero to NULL when writing pay_profiles sen values",
+   "file": "backend/app/hr.py",
+   "line": 230,
+   "severity": "medium",
+   "evidence": "approve() writes the pay profile that feeds the payroll master CSV (which feeds actual bank payments) with `\"b\": int(round(float(basic or emp.basic_salary or 0) * 100)) or None` and the same pattern for hourly \u2014 float math on money violates domain R6 / PRD ground rule 6 (Decimal in engine, integer sen in DB, floats only at the serialization edge), and the trailing `or None` silently turns a legitimate 0 into NULL. It also assigns the raw JSON value directly to a Decimal column (`emp.basic_salary = basic` at line 214) with no Decimal coercion, unlike main.py which uses _dec().",
+   "proposed_fix": "Convert with Decimal end-to-end: `sen = int((D(basic or emp.basic_salary or 0) * 100).to_integral_value(ROUND_HALF_UP))`; store 0 as 0 and use an explicit `if pay_type == 'monthly'` to decide which column is NULL; coerce body values via the shared _dec/D helper before assigning to ORM Decimal columns."
+  },
+  {
+   "id": "QT-09",
+   "title": "Statutory engine exists in three diverged copies (backend/app, webapp/app, build_payroll.py) \u2014 divergence already produced conflicting rates",
+   "file": "build_payroll.py",
+   "line": 105,
+   "severity": "high",
+   "evidence": "webapp/app/core/* is a near-copy of backend/app/core/* (statutory.py, eis.py, pcb.py byte-identical; socso.py/kwsp.py/rates.py diverged \u2014 webapp still has `SOCSO_C1_EMP = Decimal(\"0.005\")`). Repo-root build_payroll.py (the tool that produced the real 2607/*.xlsx payroll workbooks) is a third implementation with `(\"SOCSO Cat 1 employee %\", 0.005, ...)` at line 105 and EPF computed as `ROUNDUP(Gross*rate)` on the raw wage (line 407) \u2014 both contradicting the fixed backend engine (1.25% employee, EPF on RM20 band upper bound per domain R2/H2). The 587d436 fix landed in exactly one of the three copies; the other two still generate wrong statutory figures if anyone runs them, and byte-identical statutory.py invites cross-porting stale code.",
+   "proposed_fix": "Quarantine hard: delete build_payroll.py and webapp/app/core (or move both under a clearly-named legacy/ directory excluded from tooling and add a top-of-file banner 'STALE RATES \u2014 do not use'); if the Excel builder must stay runnable, refactor it to import rates/figures from backend.app.core so there is one engine; add a repo test that fails if any file outside backend/ defines SOCSO/EPF rate constants."
+  },
+  {
+   "id": "QT-10",
+   "title": "Missing return-type annotations and docstrings across the public API surface; core calculators take untyped wage params",
+   "file": "backend/app/main.py",
+   "line": 66,
+   "severity": "low",
+   "evidence": "Aggregated per module (standard mandates type hints and Google-style docstrings on all public functions): main.py \u2014 ~30 endpoint functions, almost none have return annotations or docstrings (e.g. `def health():`, `def login(request, body, db):`); hr.py \u2014 13 of 15 endpoints lack both; registration.py, payroll_export.py similar; serializers.py `_num(v)` fully untyped; core modules kwsp/socso/eis/pcb declare `def contribution(wage, ...)` / `def band_upper(wage, ...)` with the money-bearing `wage` parameter untyped (implicit Any) despite Decimal-typed returns; models.py `editable_by(self, user)` user untyped.",
+   "proposed_fix": "Annotate endpoint returns (dict / Response), type `wage: Decimal | int | str` (or a Money alias) on all core calculator signatures, type `user: User` in editable_by, and add one-line Google-style docstrings to each public endpoint; enforce with ruff ANN + D rules in the new pyproject."
+  },
+  {
+   "id": "QT-11",
+   "title": "Request-time sys.path mutation and __import__ hack with a real hardcoded Google Sheet ID fallback",
+   "file": "backend/app/hr.py",
+   "line": 308,
+   "severity": "low",
+   "evidence": "`GOOGLE_SHEET_ID = __import__(\"os\").environ.get(\"GOOGLE_SHEET_ID\", \"1uQxJ4Pa6YIc6bIz01WB5bBUU78V6nvtSIIU5Jv5oE_A\")` \u2014 a real production sheet id committed as a code default (the sheet holds applicant PII per \u00a77), plus a gratuitous __import__ instead of the module's imports. sync_google_sheet (line 331) does `_sys.path.insert(0, ...)` on every request to import import_legacy_form \u2014 sys.path grows per call and the import layout depends on the container's file placement.",
+   "proposed_fix": "Move GOOGLE_SHEET_ID into config.py with `os.environ.get(\"GOOGLE_SHEET_ID\", \"\")` (empty default; endpoint returns 503 when unset), and move import_legacy_form.py's import_worksheet into the app package (e.g. app/legacy_import.py) so it is a normal top-level import with no path mutation."
+  },
+  {
+   "id": "QT-12",
+   "title": "Employee-code generation via select max()+1 is race-prone and 500s on collision",
+   "file": "backend/app/registration.py",
+   "line": 117,
+   "severity": "low",
+   "evidence": "`code = db.scalar(text(\"select 'ONNI' || lpad((coalesce(max(substring(emp_code from '\\\\d+')::int),0)+1)::text, 4, '0') from employees\"))` \u2014 two concurrent public registrations (anonymous PWA endpoint) can read the same max and both insert the same emp_code; the unique constraint on employees.emp_code then raises IntegrityError \u2192 unhandled 500 for the applicant, and the transaction's satellite rows are lost.",
+   "proposed_fix": "Allocate from a Postgres sequence (e.g. `create sequence emp_code_seq`, code = 'ONNI' || lpad(nextval(...))) or catch IntegrityError and retry the insert with a fresh code; add a concurrency test with two parallel submissions."
+  },
+  {
+   "id": "QT-13",
+   "title": "Module-level `assert` guards API/serializer field consistency \u2014 stripped under python -O; deprecated on_event startup hook",
+   "file": "backend/app/main.py",
+   "line": 428,
+   "severity": "low",
+   "evidence": "`assert set(SETTING_KINDS) == set(SETTINGS_FIELDS)` is the only guard keeping the settings API and serializer in sync; running uvicorn under `python -O` removes it silently. Startup logic uses `@app.on_event(\"startup\")` (main.py:35), deprecated since FastAPI 0.93 in favor of lifespan handlers \u2014 the pinned fastapi==0.115.6 emits DeprecationWarning and future upgrades will break it.",
+   "proposed_fix": "Replace the assert with `if set(SETTING_KINDS) != set(SETTINGS_FIELDS): raise RuntimeError(...)` (or better, a unit test), and migrate _startup to a lifespan context manager passed to FastAPI(lifespan=...)."
+  },
+  {
+   "id": "QT-14",
+   "title": "Health endpoint returns only {ok: true} \u2014 no status/version/timestamp per the API convention",
+   "file": "backend/app/main.py",
+   "line": 65,
+   "severity": "low",
+   "evidence": "`@app.get(\"/api/health\")\\ndef health():\\n    return {\"ok\": True}` \u2014 the user's global API convention (CLAUDE.md Part 3) requires every API to expose a health endpoint returning status, version, and timestamp; there is no version identifier anywhere in the app, so deployed-version verification during the month-end payroll window (\u00a712) is impossible.",
+   "proposed_fix": "Return `{\"status\": \"ok\", \"version\": APP_VERSION, \"timestamp\": dt.datetime.now(dt.timezone.utc).isoformat()}` with APP_VERSION sourced from config/env (set at image build), and add a DB connectivity check (`select 1`) so the healthcheck actually reflects serviceability."
+  },
+  {
+   "id": "FE-01",
+   "title": "PWA manifest icons do not exist \u2014 installability (PRD Phase 5 hard requirement) fails",
+   "file": "ui/vite.config.js",
+   "line": 21,
+   "severity": "high",
+   "evidence": "Manifest declares `{ src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any maskable' }` and the 512 equivalent, and `includeAssets: ['style.css', 'icons/icon-192.png', 'icons/icon-512.png']` \u2014 but `ui/public/` contains only `style.css` (no `icons/` directory anywhere in the repo). Both icon URLs 404 at runtime, so Chrome's installability check and Lighthouse PWA audit fail. PRD Phase 5: \"Web app manifest (name, icons incl. 192/512 maskable...), installable on Android/iOS\" and acceptance criterion 5 \"PWA deployed ... installable\". README.md:114 already claims \"installable (manifest + service worker)\", which is currently false. There is also no apple-touch-icon/meta for iOS in ui/index.html.",
+   "proposed_fix": "Add real 192x192 and 512x512 PNGs under ui/public/icons/. Declare separate entries for `purpose: 'any'` and `purpose: 'maskable'` (combined 'any maskable' is flagged by Lighthouse and crops badly). Add `<link rel=\"apple-touch-icon\" href=\"/icons/icon-192.png\">` to ui/index.html for iOS. Verify with Lighthouse PWA audit before claiming installability in README."
+  },
+  {
+   "id": "FE-02",
+   "title": "Production styling depends on the Tailwind Play CDN \u2014 third-party runtime script, no SRI, breaks offline app shell",
+   "file": "ui/index.html",
+   "line": 7,
+   "severity": "medium",
+   "evidence": "`<script src=\"https://cdn.tailwindcss.com\"></script>` \u2014 the Play CDN is explicitly \"not for production\" (it JIT-compiles CSS in the browser on every load and logs a console warning). It is a render-blocking, un-pinned, no-SRI third-party script on a payroll app (supply-chain exposure for RESTRICTED data screens). Offline/app-shell: vite.config.js works around it with a CacheFirst runtimeCaching rule for cdn.tailwindcss.com, so the shell is unstyled on any first visit where the CDN is unreachable, and the PRD's \"precache app shell\" requirement is only met via a mutable third-party fetch. Also violates PROJECT_PROFILE \u00a711 (\"UI bundle default budget applies\").",
+   "proposed_fix": "Install Tailwind as a build-time dependency (@tailwindcss/vite or PostCSS plugin), move the inline `tailwind.config` (brand/moss colors) into tailwind.config.js, emit a hashed CSS asset that vite-plugin-pwa precaches, and delete both the CDN <script> in index.html and the `cdn` runtimeCaching entry in vite.config.js."
+  },
+  {
+   "id": "FE-03",
+   "title": "Offline-queued registration silently drops all uploaded documents with no retry path",
+   "file": "ui/src/pages/Register.jsx",
+   "line": 149,
+   "severity": "medium",
+   "evidence": "On offline submit only the JSON form is queued: `await idbSet(QUEUE_KEY, { form: payload, at: Date.now() })` \u2014 the `files` state (NRIC front/back, food-handler cert, typhoid proof, etc.) is never persisted to IndexedDB. When `flushQueue()` later succeeds (lines 86\u201394) it posts the form, sets `docs: 'pending'`, and never calls `uploadDocs`, so the documents are permanently lost; the success screen offers no re-upload UI. PRD Phase 5 hard requirement: \"Uploads retry when back online.\" Consequence: submissions arrive without mandatory KKM documents, `missing_document` flags block activation, and HR must chase every spotty-connection applicant.",
+   "proposed_fix": "Persist the selected files (File/Blob store fine in IndexedDB) alongside the queued form: `idbSet(QUEUE_KEY, { form, files, at })`. In flushQueue, after obtaining the reference number, run uploadDocs with the stored blobs and report per-document status; keep failed docs queued. Also surface a re-upload screen keyed by reference number for docs that failed after an online submit."
+  },
+  {
+   "id": "FE-04",
+   "title": "Registration queue race can double-submit, and navigator.onLine misdetection skips queueing on flaky networks",
+   "file": "ui/src/pages/Register.jsx",
+   "line": 148,
+   "severity": "low",
+   "evidence": "(1) `flushQueue()` is invoked from both the mount effect (line 77) and every 'online' event (line 73) with no in-flight guard; two concurrent calls both read QUEUE_KEY before either deletes it, POSTing /api/register twice and creating duplicate applicant records (domain hazard H4 says duplicates must be flagged, so this pollutes the HR queue). (2) The queue branch is gated on `if (!navigator.onLine)` \u2014 when fetch fails while onLine is true (captive portal, DNS failure, backend down: the exact \"spotty-connection\" case the PRD names), the submission is NOT queued; the applicant just sees the raw error. (3) A successful flush also overwrites any new form the applicant is currently filling via `setDone(...)` (line 92).",
+   "proposed_fix": "Add a module-level in-flight flag (or delete QUEUE_KEY before posting and restore on failure) so flushQueue is single-flight. Queue on any network-level failure (err instanceof TypeError) regardless of navigator.onLine. Only setDone from flushQueue when the form is untouched, otherwise show a small banner (\"your earlier registration was sent \u2014 ref GF-xxx\")."
+  },
+  {
+   "id": "FE-05",
+   "title": "Demo credentials for all three roles are hardcoded into the Login page and ship in every build",
+   "file": "ui/src/pages/Login.jsx",
+   "line": 50,
+   "severity": "high",
+   "evidence": "`Demo accounts \u2014 <b>preparer</b>/preparer123 \u00b7 <b>approver</b>/approver123 \u00b7 <b>admin</b>/admin123` is rendered unconditionally. actors.md marks these as \"TRIAL-only; must never reach prod\", and PROJECT_PROFILE \u00a713 classifies the system PROD-critical with real data already present. Any deployment of this build advertises working admin credentials on the login screen \u2014 an outsider can approve payroll runs, edit statutory rates, and read every NRIC/bank account, directly violating the \u00a71 core guarantee.",
+   "proposed_fix": "Gate the hint behind `import.meta.env.DEV` (or a backend-provided `demo_mode` flag from /api/auth/me), so production bundles never contain the string. Pair with the backend fix that stops seeding these accounts outside trial mode."
+  },
+  {
+   "id": "FE-06",
+   "title": "Payroll run: unsaved cell edits are silently excluded when submitting/approving \u2014 approved run can differ from what the preparer sees",
+   "file": "ui/src/pages/PayrollRun.jsx",
+   "line": 292,
+   "severity": "medium",
+   "evidence": "`const submit = () => window.confirm('Save your edits first. Send for approval now?') && act(() => api.post(`/api/runs/${runId}/submit`), ...)` \u2014 Send only changes status; `setField` edits (basic, OT hours, deductions, PCB override) live purely in local state until the separate \"Save & Recalculate\" button posts them. A preparer who types a deduction and clicks Send submits the last-saved figures while their screen still shows the edited ones; the approver then locks a run that pays the wrong net salary (\u00a71 violation). There is also no dirty-state indicator and no navigation/beforeunload guard, so edits are lost without warning on route change.",
+   "proposed_fix": "Track dirty state (compare slips vs detail.slips). Make Send first persist: `await api.put(`/api/runs/${runId}`, { remarks, slips })` then POST /submit (or disable Send while dirty with an explicit \"unsaved changes\" badge). Add a router blocker/beforeunload prompt while dirty. Same for the Dashboard approve path if edits are pending."
+  },
+  {
+   "id": "FE-07",
+   "title": "No 401/session-expiry handling and several pages have no error or loading state \u2014 failures render a permanent blank page",
+   "file": "ui/src/pages/HRQueue.jsx",
+   "line": 10,
+   "severity": "medium",
+   "evidence": "`const load = () => api.get('/api/hr/queue').then((d) => setQueue(d.queue))` has no `.catch` \u2014 a failed load is an unhandled rejection and the page stays at `if (!queue) return null` forever (blank screen, no message). Same in HRCompliance.jsx:9 (`api.get('/api/hr/compliance').then(setData)`). Globally, ui/src/api.js throws ApiError but nothing reacts to status 401: App.jsx checks /api/auth/me once at mount, so when the session cookie expires mid-shift every click just flashes an error over a dead UI \u2014 during the month-end payroll window this stalls the critical journey. Every page also uses `return null` while loading (no spinner/skeleton), and Employees.jsx renders a header-only table when a filter matches zero rows.",
+   "proposed_fix": "In api.js, on `res.status === 401` dispatch a handler that clears the user in App context (returning to <Login/> while preserving the current route for post-login redirect). Add `.catch((e) => flash(e.message, 'error'))` plus a visible error state to HRQueue and HRCompliance. Introduce shared <Loading/> and <ErrorState retry={load}/> components used by all pages instead of `return null`, and an empty-row message in Employees."
+  },
+  {
+   "id": "FE-08",
+   "title": "money() renders legitimate zero amounts as '-' on payslips and payroll tables",
+   "file": "ui/src/api.js",
+   "line": 36,
+   "severity": "low",
+   "evidence": "`export const money = (v) => { const n = Number(v || 0); return n ? n.toLocaleString(...) : '-' }` \u2014 0 is falsy, so a true RM0.00 figure (EPF for a non-opted foreign worker, PCB 0, zero deduction) displays as '-' on the on-screen payslip (Payslip.jsx deduction rows) and the run table, indistinguishable from \"not applicable\". On a statutory pay document that ambiguity invites disputes and mis-reading during approval.",
+   "proposed_fix": "Reserve '-' for null/undefined/'' only: `if (v === null || v === undefined || v === '') return '-'; return Number(v).toLocaleString('en-MY', { minimumFractionDigits: 2, maximumFractionDigits: 2 })`. Apply the same to money0."
+  },
+  {
+   "id": "FE-09",
+   "title": "No route-level code splitting \u2014 public /register applicants download the entire admin payroll bundle",
+   "file": "ui/src/App.jsx",
+   "line": 4,
+   "severity": "low",
+   "evidence": "All twelve pages are statically imported (`import Login from './pages/Login.jsx'` ... `import HRCompliance from './pages/HRCompliance.jsx'`), producing one bundle. Mobile applicants on spotty connections (the PWA's stated audience) must fetch PayrollRun, Dashboard, Settings, HR pages, etc. before the registration form renders. The audit dimension and \u00a711 bundle budget call for route-level splitting; at minimum the public face should not carry the authed app.",
+   "proposed_fix": "Convert page imports to `React.lazy(() => import('./pages/X.jsx'))` with a <Suspense fallback> \u2014 at minimum split Register (public) from the authed app so /register loads only React + router + the form. Keep the Register chunk in the SW precache so the offline form still works."
+  },
+  {
+   "id": "FE-10",
+   "title": "UI Docker build ignores package-lock.json and uses npm install \u2014 unpinned, non-reproducible builds",
+   "file": "ui/Dockerfile",
+   "line": 3,
+   "severity": "low",
+   "evidence": "`COPY package.json ./` followed by `RUN npm install` \u2014 package-lock.json (present in ui/) is never copied, so every image build re-resolves semver ranges (react ^18.3.1, vite ^5.4.11, vite-plugin-pwa ^1.3.0) at build time. A payroll UI image can silently pick up different dependency versions between builds (supply-chain drift, unreproducible releases).",
+   "proposed_fix": "Change to `COPY package.json package-lock.json ./` and `RUN npm ci` so the lockfile is authoritative in the image build."
+  },
+  {
+   "id": "FE-11",
+   "title": "UI served over plain HTTP with no security headers \u2014 service worker and install silently fail on any non-localhost deployment",
+   "file": "ui/nginx.conf",
+   "line": 2,
+   "severity": "medium",
+   "evidence": "nginx only has `listen 80;` and docker-compose.yml publishes `\"8077:80\"` with no TLS termination anywhere in the stack. PRD Phase 5 hard requirement: \"HTTPS ... passes Lighthouse PWA installability checks\" \u2014 service workers and beforeinstallprompt require a secure context, so on any real host the SW never registers and offline drafts/queueing never activate (it only works on localhost dev). The session cookie and RESTRICTED payroll/NRIC/bank data also travel cleartext. nginx.conf additionally sets no security headers (X-Content-Type-Options, X-Frame-Options/frame-ancestors, HSTS, CSP).",
+   "proposed_fix": "Terminate TLS in front of the ui container (Caddy/Traefik service in compose, or certs + `listen 443 ssl` in nginx) and document HTTPS as a deploy prerequisite in README/run.md. Add baseline headers in nginx.conf: `add_header X-Content-Type-Options nosniff; add_header X-Frame-Options DENY;` plus HSTS once TLS exists, and a CSP that also removes the need for the Tailwind CDN origin (see FE-02)."
+  },
+  {
+   "id": "FE-13",
+   "title": "One-click Deactivate on the employee list, adjacent to Edit, with no confirmation",
+   "file": "ui/src/pages/Employees.jsx",
+   "line": 122,
+   "severity": "low",
+   "evidence": "`<button onClick={() => toggle(e)} ...>{e.active ? 'Deactivate' : 'Activate'}</button>` fires `POST /api/employees/{id}/toggle` immediately \u2014 no confirm dialog, and the button sits directly beside the Edit link on every row. An accidental click marks an active employee inactive, silently excluding them from the next payroll run's \"Add all active\"/sync (an unpaid active employee violates the \u00a71 guarantee). Contrast: run delete, approve, submit, reject and bank-verify all use window.confirm.",
+   "proposed_fix": "Wrap the deactivate direction in a confirm (`if (e.active && !window.confirm(`Deactivate ${e.name}? They will be excluded from new payroll runs.`)) return`), or replace with an explicit menu action; keep the flash-with-undo pattern as an alternative."
+  }
+ ],
+ "plausible": [],
+ "gaps": [
+  {
+   "id": "GAP-01",
+   "title": "Foreign-worker and age-60 statutory branches missing: SOCSO charges foreigners Category 1, EPF ignores the 2% foreign rule and the 60+ (0%/4%) rates",
+   "file": "backend/app/statutory.py",
+   "line": 92,
+   "severity": "critical",
+   "evidence": "compute() passes `foreign` only to eis.contribution (line 93); socso.contribution(stat, inp.over_60, inp.socso_enabled, cfg) has no foreign branch, so a foreign worker under 60 is charged employee-side Category 1 SOCSO when PERKESO puts foreign workers on the employer-only Employment Injury Scheme. kwsp.contribution(wage, enabled) is binary \u2014 no foreign rate and no age-60+ rate (citizen 60+ should be employee 0% / employer 4%; engine charges 11%/13%). The repo's own tooling asserts the rule it violates: build_payroll.py instructions sheet says 'Foreign workers (e.g. Nay Lin Zaw): SOCSO Employment-Injury applies, and EPF becomes mandatory at 2% from Oct 2025' \u2014 and Nay Lin Zaw is in the live ACTIVE_ROSTER (backend/import_legacy_form.py:38-43). Domain file .claude/domain/payroll/statutory.md H5 marks foreign EPF/SOCSO divergence [confirmed] and OPEN-2 ('who derives over_60/foreign') was never resolved. STAT-05 only covered the age-60 cutoff date for SOCSO; no STAT finding covers foreign SOCSO, foreign EPF, or 60+ EPF rates.",
+   "proposed_fix": "Add `foreign` to socso.contribution and route foreign workers to the Employment Injury Scheme (employer-only 1.25% table); add age/foreign parameters to kwsp.contribution implementing citizen-60+ (0%/4%) and non-citizen (2%/2% from Oct 2025) rates from the official schedules; derive both flags from DOB and identity_type at run time (resolving domain OPEN-2); extend the self-test with foreign and 60+ worked scenarios."
+  },
+  {
+   "id": "GAP-02",
+   "title": "Statutory nationality inferred from bank name ('merchantrade') and EPF silently disabled for all part-time staff",
+   "file": "backend/app/importer.py",
+   "line": 115,
+   "severity": "high",
+   "evidence": "_is_foreign(bank) returns True iff 'merchantrade' appears in the bank name (lines 115-117); this boolean drives EIS exclusion and epf_enabled=(employment_type=='full_time' and not foreign) at line 152. A Malaysian using Merchantrade loses EPF and EIS; a foreign worker using Maybank is treated as local. Separately, every part-time/hourly employee gets epf_enabled=False although EPF is mandatory for part-time employees (Part-Time Employees Regulations); no hr_review_flag is raised for either guess, violating the zero-silent-fixes rule. Note registration.py:127 uses the correct signal (identity_type != 'nric') \u2014 the importer diverges. No DL/STAT finding covers this classification path.",
+   "proposed_fix": "Derive is_foreign from identity_type (passport/unhcr) exactly as registration.py does; never from bank name. Make part-time EPF eligibility an explicit HR decision with a warning flag instead of a hardcoded False. Raise a work_authorization_review / statutory-classification flag whenever the importer guesses either value."
+  },
+  {
+   "id": "GAP-03",
+   "title": "Leavers vanish from payroll_master_view (and the master CSV the clerk pays from) the moment they resign \u2014 final month's pay is never exported",
+   "file": "supabase/migrations/0004_views.sql",
+   "line": 36,
+   "severity": "high",
+   "evidence": "payroll_master_view has `where e.status = 'active'` (0004_views.sql:36). The resign endpoint (backend/app/hr.py:260-281) inserts the 'resigned' history row immediately, and trg_employees_status syncs employees.status = 'resigned' at once (0005_status_lifecycle.sql:60) \u2014 even when last_working_day is weeks away. So the employee drops out of the master view and master CSV instantly; the export's `last_working_day >= period start` filter (payroll_export.py:47) is dead code because resigned rows never reach it. This contradicts PRD Phase 2 ('They simply drop out of the payroll view after last_working_day') and Phase 4's view spec, and makes acceptance criterion 4 pass vacuously (ALL leavers are excluded, not just last month's). The status sync also flips the `active` boolean the run population pays from, so the final salary is dropped from the run too. No STAT/DL finding covers the premature exclusion direction.",
+   "proposed_fix": "Change the view predicate to include employees whose last_working_day is null or >= the period start regardless of resigned/terminated status (status in ('active') OR (status in ('resigned','terminated','absconded') and last_working_day >= period start)), parameterized via the export query; add the PRD's acceptance test in both directions (leaver last month excluded, leaver this month included with final_pay_due)."
+  },
+  {
+   "id": "GAP-04",
+   "title": "rls_test.sql proves almost nothing: 4 of 14 tables, no views, no staff/manager cases, no assertions \u2014 yet README cites it as proof",
+   "file": "supabase/rls_test.sql",
+   "line": 6,
+   "severity": "medium",
+   "evidence": "The script tests only employees, bank_accounts, pay_profiles, employee_documents as anon, and two tables as authenticated. It never touches payslips, payroll_runs, users (password hashes), settings, audit_log, hr_review_flags, emergency_contacts, application_submissions, employee_status_history, employee_positions \u2014 all RLS-enabled in 0003_rls.sql:8-21 \u2014 and never queries payroll_master_view/payroll_blocked_view/payroll_movements_view, the exact security-definer leak SEC-02 confirmed. It has no assertions ('Every SELECT must return 0 rows' is an eyeball instruction), so it cannot fail in CI, and there is no recorded run output. PRD acceptance criterion 2 explicitly requires proving 'staff cannot read others' bank rows' \u2014 impossible since no staff role exists. README.md:57 nevertheless claims RLS is 'proven by supabase/rls_test.sql'.",
+   "proposed_fix": "Rewrite as an asserting script (DO blocks raising exceptions on any visible row / permitted write) covering every RLS table and all three views for anon and authenticated; add staff/manager cases once those roles exist (GAP-05); wire it into `make test` and record a passing run; soften the README claim until it actually passes."
+  },
+  {
+   "id": "GAP-05",
+   "title": "PRD role model unimplemented: no staff self-service role, no outlet-scoped manager role, no per-role RLS policies",
+   "file": "backend/app/security.py",
+   "line": 57,
+   "severity": "medium",
+   "evidence": "PRD Phase 1 requires four RLS roles: hr_admin (full), manager (outlet-scoped employee reads, no bank/pay/identity docs), staff (read/update own contact fields, upload own documents), anon (insert-only submissions). The app implements only preparer/approver/admin API-level guards (security.py role checks); 0003_rls.sql is deny-all with no per-role policies; there is no employee login, no self-service contact update, no own-document upload, and no outlet scoping anywhere in backend or ui/src. Existing SEC findings cover auth weaknesses of the roles that exist, but no dimension flagged that two of the PRD's four roles were never built.",
+   "proposed_fix": "Either implement staff self-service (own-record contact edit + document upload behind employee auth) and outlet-scoped manager reads with matching RLS policies, or record a human DECISION descoping them from Payroll 2.0 and update README/PRD traceability accordingly."
+  },
+  {
+   "id": "GAP-06",
+   "title": "HR 'request re-submission' action (PRD Phase 5B) does not exist in backend or UI",
+   "file": "backend/app/hr.py",
+   "line": 1,
+   "severity": "medium",
+   "evidence": "PRD Phase 5B lists HR actions: 'resolve/dismiss flags, request re-submission, edit fields (audited), Approve, Reject'. grep for resubmit/re_submit/resubmission across backend/ and ui/src returns nothing; hr.py exposes approve, reject, resign, flag resolve/dismiss, edits \u2014 but no way to ask an applicant to fix or re-send a bad submission (wrong NRIC photo, corrupted bank account). HR's only options for a fixable submission are rejecting it outright or editing data themselves, which defeats the verification intent for bank/NRIC corrections.",
+   "proposed_fix": "Add a request-resubmission endpoint + UI action that sets a distinct employee state or flag, issues a re-entry link/reference for the public form pre-keyed to the existing record, and audits the request; surface it in the HR queue."
+  },
+  {
+   "id": "GAP-07",
+   "title": "Uninventoried PII surfaces: real names, full bank account numbers and salaries hardcoded in build_payroll.py, plus seven git-tracked data files no SEC/INFRA finding names",
+   "file": "build_payroll.py",
+   "line": 317,
+   "severity": "high",
+   "evidence": "build_payroll.py:317+ hardcodes the real roster with full bank account numbers and salaries (e.g. emp(\"ON00010\", \"cheong fong cheng\", \"Cimb\", \"7000986177\", ..., basic=5000)). JUNE_2026_PAYROLL_ANALYSIS.md contains real employee names with payroll figures. backend/import_legacy_form.py:38-43 hardcodes the ACTIVE_ROSTER real names (SEC-09 named only seed.py). git ls-files confirms these tracked PII files that no SEC/INFRA finding enumerates: emp_payroll_2605.xlsx, emp_payroll_2606.xlsx, 'employee-registration-form (1).xlsx' (root), 2607/Emp_Payroll_July_2026_from_img.xlsx, 2607/emp_payroll_2607._populated.backup.xlsx (+2 .bak variants), backups/pre-migration-20260802.sql, backups/payroll.db.20260802, webapp/payroll.db. SEC-08/SEC-09/INFRA-08 covered only the backend image xlsx, seed.py names, and the Sheet ID; worklog ERR-001 flags the class of problem but the audit produced no complete remediation inventory and .gitignore excludes none of these.",
+   "proposed_fix": "Treat this list plus SEC-08/09/INFRA-08 items as the canonical PII purge inventory: replace hardcoded rosters/accounts in build_payroll.py and import_legacy_form.py with external synthetic fixtures, delete or externalize the xlsx/db/sql data files, add exclusion patterns to .gitignore, then execute the human-approved git-history rewrite ERR-001 is waiting on."
+  },
+  {
+   "id": "GAP-08",
+   "title": "PRD deliverables never produced or verified: Phase 0 discovery report absent, no deployment/Lighthouse/airplane-mode verification, daily expiry job a silent no-op without pg_cron",
+   "file": "prompt/agent-prompt-employee-db-pwa.md",
+   "line": 296,
+   "severity": "medium",
+   "evidence": "Deliverable 1 (Phase 0 discovery report before any migration) exists nowhere in the repo (grep across docs/, .claude/, *.md finds nothing). Deliverable 5's verification steps were never executed: no deployment exists (FE-11 covers HTTP but not the missing deployment/Lighthouse run), and the offline form-draft airplane-mode check was never performed or recorded. Deliverable 4's resigned-employee check was never run as a test \u2014 and would currently mask GAP-03 since it only tests the exclusion direction. Phase 2's 'daily' expiry job is scheduled only `if exists pg_cron` (0005_status_lifecycle.sql:106-111); the compose postgres:16 image has no pg_cron and the local profile never applies migrations (INFRA-03), so on every non-Supabase deployment flags refresh only at backend startup (main.py:49) and compliance-board loads (hr.py:348) \u2014 never daily.",
+   "proposed_fix": "Write the discovery report retroactively into docs/; add an acceptance-criteria traceability checklist mapping each PRD deliverable to evidence (test, run log, or DECISION descoping it); run and record Lighthouse + offline-draft verification once FE-01/FE-02 are fixed; make expiry-flag freshness deterministic (in-app scheduler or documented cron) instead of the conditional pg_cron block."
+  },
+  {
+   "id": "GAP-09",
+   "title": "Documentation asserts things the code contradicts; mandated worklog is skeletal",
+   "file": "README.md",
+   "line": 57,
+   "severity": "low",
+   "evidence": "README.md:57 claims RLS is 'proven by supabase/rls_test.sql' (contradicted by GAP-04/SEC-02); README.md:97-98 claims import 're-runs refresh satellite rows and never duplicate' while DL-05 shows re-runs delete HR-verified bank rows, documents, and append-only history; README.md:16 and run.md:13 publish the weak demo credentials (SEC-03). README_PAYROLL.md claims SOCSO uses the 'Official RM100-band table' though the engine formula deviates at 5-sen ties (domain H1) and the band table misses sub-bands (STAT-06); JUNE_2026_PAYROLL_ANALYSIS.md opens with 'All figures verified' against an engine now shown wrong (STAT-01/02/06, GAP-01), and states SOCSO Cat 1 employee 0.5% while the live engine constant is 1.25% (QT-02). docs/worklog.md has zero FIX/LL rows and no session summaries despite CLAUDE.md Part 4 making them mandatory.",
+   "proposed_fix": "Correct or caveat each claim as the referenced fixes land (treat README as part of every fix's definition of done); mark JUNE_2026_PAYROLL_ANALYSIS.md as superseded; backfill worklog fixes/lessons/session-summary sections when the audit remediation begins."
+  },
+  {
+   "id": "GAP-10",
+   "title": "OT-eligibility fallback hardcodes the RM4,000 rule as logic in payroll_master_view, which the PRD explicitly forbade",
+   "file": "supabase/migrations/0004_views.sql",
+   "line": 21,
+   "severity": "low",
+   "evidence": "The view computes `coalesce(pp.ot_eligible, e.basic_salary <= 4000)` \u2014 a statutory-coverage rule baked into SQL. The PRD's pay_profiles spec says 'statutory OT applies \u2264 RM4,000/month basic \u2014 verify current rule, don't hardcode as logic' (ot_eligible is meant to be an HR-set boolean). The fallback also reads legacy employees.basic_salary (RM numeric) rather than pay_profiles sen, silently deciding OT eligibility for every employee whose pay_profile row is missing \u2014 which per DL-08 is most of them, since pay_profiles is write-only.",
+   "proposed_fix": "Remove the salary-threshold fallback from the view; make ot_eligible NOT NULL on pay_profiles set explicitly at HR activation, and raise a review flag instead of guessing when it is absent. Keep any statutory threshold in the rates config with a verification note, not in DDL."
+  }
+ ]
+}

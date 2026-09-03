@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api, money, BADGE } from '../api.js'
 import { useApp } from '../App.jsx'
+import { ErrorState, Loading } from '../components/Async.jsx'
 
 const num = (v) => (v === null || v === undefined || v === '' ? '' : String(+v))
 
@@ -242,23 +243,40 @@ export default function PayrollRun() {
   const [rejectOpen, setRejectOpen] = useState(false)
   const [rejectNote, setRejectNote] = useState('')
   const [sheetEmp, setSheetEmp] = useState(null)   // employee being added via the mobile sheet
+  const [error, setError] = useState(null)
+  const [dirty, setDirty] = useState(false)        // unsaved cell/remark edits (FE-06)
 
   const apply = (d) => {
     setDetail(d)
     setSlips(d.slips)
     setRemarks(d.run.remarks || '')
+    setDirty(false)
   }
 
-  useEffect(() => {
-    api.get(`/api/runs/${runId}`).then(apply).catch((e) => flash(e.message, 'error'))
-  }, [runId])
+  const load = () => {
+    setError(null)
+    api.get(`/api/runs/${runId}`).then(apply)
+      .catch((e) => { setError(e.message); flash(e.message, 'error') })
+  }
+  useEffect(() => { load() }, [runId])
 
-  if (!detail) return null
+  // never lose edits silently on tab close / refresh while dirty (FE-06)
+  useEffect(() => {
+    if (!dirty) return
+    const warn = (e) => { e.preventDefault(); e.returnValue = '' }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [dirty])
+
+  if (error && !detail) return <ErrorState message={error} retry={load} />
+  if (!detail) return <Loading label="Loading payroll…" />
   const { run, totals, available } = detail
   const editable = run.editable_by_me
 
-  const setField = (id, field, value) =>
+  const setField = (id, field, value) => {
+    setDirty(true)
     setSlips((ss) => ss.map((s) => (s.id === id ? { ...s, [field]: value } : s)))
+  }
 
   const act = (fn, okMsg) => async () => {
     try {
@@ -289,10 +307,35 @@ export default function PayrollRun() {
     (d) => (d.added ? `Added ${d.added} new employee(s).` : 'No new active employees to add.'))
   const remove = (slip) => act(() => api.del(`/api/runs/${runId}/slips/${slip.id}`),
     `Removed ${slip.name} from the payroll.`)()
-  const submit = () => window.confirm('Save your edits first. Send for approval now?') &&
-    act(() => api.post(`/api/runs/${runId}/submit`), `${run.period_label} sent for approval.`)()
-  const approve = () => window.confirm('Approve and lock this payroll?') &&
-    act(() => api.post(`/api/runs/${runId}/approve`), `${run.period_label} approved. Payslips are now final.`)()
+  // Submit/Approve persist pending edits first, so the approved run always
+  // matches what is on screen — edits are never silently dropped (FE-06).
+  const saveIfDirty = async () => {
+    if (dirty) apply(await api.put(`/api/runs/${runId}`, { remarks, slips }))
+  }
+  const submit = async () => {
+    const msg = dirty
+      ? 'You have unsaved edits — they will be saved and recalculated, then sent for approval. Continue?'
+      : 'Send for approval now?'
+    if (!window.confirm(msg)) return
+    try {
+      await saveIfDirty()
+      const d = await api.post(`/api/runs/${runId}/submit`)
+      if (d?.run) apply(d)
+      flash(`${run.period_label} sent for approval.`)
+    } catch (e) { flash(e.message, 'error') }
+  }
+  const approve = async () => {
+    const msg = dirty
+      ? 'You have unsaved edits — they will be saved and recalculated, then the payroll is approved and locked. Continue?'
+      : 'Approve and lock this payroll?'
+    if (!window.confirm(msg)) return
+    try {
+      await saveIfDirty()
+      const d = await api.post(`/api/runs/${runId}/approve`)
+      if (d?.run) apply(d)
+      flash(`${run.period_label} approved. Payslips are now final.`)
+    } catch (e) { flash(e.message, 'error') }
+  }
   const reject = act(() => api.post(`/api/runs/${runId}/reject`, { note: rejectNote }),
     `${run.period_label} returned to the preparer.`)
   const remove_run = async () => {
@@ -516,7 +559,7 @@ export default function PayrollRun() {
           <div className="bg-white rounded-xl shadow p-4 mt-4">
             <label className="block text-sm font-medium mb-1">Remarks for this payroll (optional)</label>
             <textarea rows="2" value={remarks} readOnly={!editable} placeholder="Notes for the approver…"
-              onChange={(e) => setRemarks(e.target.value)}
+              onChange={(e) => { setDirty(true); setRemarks(e.target.value) }}
               className={'w-full rounded-lg border border-slate-300 px-3 py-2 text-sm ' + (!editable ? 'bg-slate-50' : '')} />
           </div>
           <p className="text-[11px] text-slate-400 mt-2">
@@ -534,8 +577,13 @@ export default function PayrollRun() {
                   Employer cost RM {money(totals.employer_cost)} · {totals.headcount} staff</div>
               </div>
               <div className="ml-auto flex items-center gap-2">
+                {dirty &&
+                  <span className="text-[11px] sm:text-xs font-medium text-amber-700 bg-amber-50 border border-amber-300 rounded px-2 py-1 whitespace-nowrap">
+                    ● Unsaved changes</span>}
                 {editable &&
-                  <button onClick={save} className="px-4 py-2.5 rounded-lg bg-brand text-white text-sm font-semibold">
+                  <button onClick={save}
+                    className={'px-4 py-2.5 rounded-lg text-white text-sm font-semibold ' +
+                      (dirty ? 'bg-amber-600' : 'bg-brand')}>
                     Save & Recalculate</button>}
                 {(run.status === 'draft' || run.status === 'rejected') && user.can_prepare &&
                   <button onClick={submit} className="px-4 py-2.5 rounded-lg bg-moss text-white text-sm font-semibold">

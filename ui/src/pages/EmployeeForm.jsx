@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api.js'
 import { useApp } from '../App.jsx'
+import { ErrorState, Loading } from '../components/Async.jsx'
 
 const EMPTY = {
   emp_code: '', name: '', employment_type: 'full_time',
@@ -18,19 +19,22 @@ export default function EmployeeForm() {
   const { flash } = useApp()
   const nav = useNavigate()
   const [emp, setEmp] = useState(null)     // loaded employee (edit mode)
+  const [error, setError] = useState(null)
   const [form, setForm] = useState(EMPTY)
 
-  useEffect(() => {
+  const load = () => {
     if (isNew) return
-    api.get(`/api/employees/${empId}`).then((e) => {
+    setError(null)
+    return api.get(`/api/employees/${empId}`).then((e) => {
       setEmp(e)
       setForm({
         ...EMPTY, ...Object.fromEntries(Object.entries(e).map(([k, v]) => [k, v ?? ''])),
         basic_salary: String(e.basic_salary ?? 0), hourly_rate: String(e.hourly_rate ?? 0),
         ot_rate: String(e.ot_rate ?? 0), dob: e.dob || '', clear_review: false,
       })
-    }).catch((err) => flash(err.message, 'error'))
-  }, [empId])
+    }).catch((err) => { setError(err.message); flash(err.message, 'error') })
+  }
+  useEffect(() => { load() }, [empId])
 
   const set = (k) => (e) =>
     setForm((f) => ({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value }))
@@ -54,7 +58,8 @@ export default function EmployeeForm() {
     } catch (err) { flash(err.message, 'error') }
   }
 
-  if (!isNew && !emp) return null
+  if (!isNew && error && !emp) return <ErrorState message={error} retry={load} />
+  if (!isNew && !emp) return <Loading label="Loading employee…" />
 
   // plain render helpers (not components — keeps input focus across re-renders)
   const field = (label, k, type = 'text', ph = '') => (

@@ -46,9 +46,12 @@ export default function Login() {
             Sign in
           </button>
         </form>
-        <div className="mt-5 text-xs text-slate-400 border-t pt-3">
-          Demo accounts — <b>preparer</b>/preparer123 · <b>approver</b>/approver123 · <b>admin</b>/admin123
-        </div>
+        {/* dev-only hint — stripped from production bundles (FE-05) */}
+        {import.meta.env.DEV && (
+          <div className="mt-5 text-xs text-slate-400 border-t pt-3">
+            Demo accounts — <b>preparer</b>/preparer123 · <b>approver</b>/approver123 · <b>admin</b>/admin123
+          </div>
+        )}
       </div>
     </div>
   )

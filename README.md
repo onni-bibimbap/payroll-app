@@ -9,15 +9,27 @@
 ## Run
 
 ```bash
-docker compose up -d --build
+make up      # dev profile: local Postgres + migrations + backend + ui
+make seed    # optional: synthetic demo users/employees (local db only)
 open http://localhost:8077
 ```
 
-Demo accounts: `preparer/preparer123` · `approver/approver123` · `admin/admin123`
+Compose profiles: `dev` (default via `make up`, local db only), `test`
+(`make test` — ephemeral db + migrations + backend pytest suite), `prod`
+(`docker compose --profile prod up -d --build --wait` — requires
+`DATABASE_URL` and `PAYROLL_SECRET` in `.env`; see `.env.example` for every
+variable). Supabase is only ever reached through the explicit prod profile.
 
-On first start the backend seeds users and imports employees from
-`backend/employee-registration-form.xlsx`, then applies the active roster.
-Data persists in the `pgdata` volume; `docker compose down -v` wipes it.
+Migrations are applied automatically by the `migrate` service before the
+backend starts (`make migrate` re-runs them; they are idempotent and tracked
+in `schema_migrations`). Containers never seed on boot — seeding is the
+explicit `make seed` one-shot, gated by `SEED_DEMO_DATA=true`, and it never
+overwrites existing users.
+
+Data persists in the `pgdata` volume; `docker compose down` keeps it. Only
+`make clean CONFIRM=wipe-data` destroys the volume. `make backup` /
+`make restore FILE=...` round-trip the local db via `pg_dump` into
+`backups/` (gitignored).
 
 ## Development outside docker
 
@@ -52,7 +64,7 @@ erDiagram
 ```
 
 Migrations live in `supabase/migrations/*.sql` (additive, idempotent; applied
-with `psql -f`). Money is integer **sen**; NRIC/bank/phone are **TEXT** always
+in order by the compose `migrate` service — `make migrate`). Money is integer **sen**; NRIC/bank/phone are **TEXT** always
 (the legacy data was corrupted by spreadsheet number cells). RLS is enabled
 deny-by-default on every table — proven by `supabase/rls_test.sql`; the
 backend is the only DB client, and enforces roles at the API layer.

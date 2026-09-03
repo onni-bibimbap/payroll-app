@@ -2,18 +2,23 @@ import React, { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { api, money } from '../api.js'
 import { useApp } from '../App.jsx'
+import { ErrorState, Loading } from '../components/Async.jsx'
 
 export default function Payslip() {
   const { runId, slipId } = useParams()
   const { flash } = useApp()
   const [d, setD] = useState(null)
+  const [error, setError] = useState(null)
 
-  useEffect(() => {
-    api.get(`/api/runs/${runId}/slips/${slipId}`).then(setD)
-      .catch((e) => flash(e.message, 'error'))
-  }, [runId, slipId])
+  const load = () => {
+    setError(null)
+    return api.get(`/api/runs/${runId}/slips/${slipId}`).then(setD)
+      .catch((e) => { setError(e.message); flash(e.message, 'error') })
+  }
+  useEffect(() => { load() }, [runId, slipId])
 
-  if (!d) return null
+  if (error && !d) return <ErrorState message={error} retry={load} />
+  if (!d) return <Loading label="Loading payslip…" />
   const { slip, run, company } = d
   const baseLabel = slip.count_by_day ? 'Base (daily)' : slip.hourly ? 'Base (hourly)' : 'Basic'
 

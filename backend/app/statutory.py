@@ -88,8 +88,10 @@ def compute(inp: PayInputs, cfg: RateConfig = DEFAULT_CONFIG) -> PayResult:
     if inp.include_ot:
         stat += ot_pay
 
-    epf_e, epf_r = kwsp.contribution(stat, inp.epf_enabled, cfg)
-    soc_e, soc_r = socso.contribution(stat, inp.over_60, inp.socso_enabled, cfg)
+    epf_e, epf_r = kwsp.contribution(stat, inp.epf_enabled, cfg,
+                                     over_60=inp.over_60, foreign=inp.foreign)
+    soc_e, soc_r = socso.contribution(stat, inp.over_60, inp.socso_enabled, cfg,
+                                      foreign=inp.foreign)
     eis_e, eis_r = eis.contribution(stat, inp.over_60, inp.foreign, inp.socso_enabled, cfg)
     ci = pcb.chargeable_income(stat, epf_e, cfg)
     pcb_amt = D(inp.pcb_override) if inp.pcb_override is not None else pcb.estimate(stat, epf_e, cfg)
@@ -110,21 +112,8 @@ def compute(inp: PayInputs, cfg: RateConfig = DEFAULT_CONFIG) -> PayResult:
     )
 
 
-if __name__ == "__main__":   # self-test against known figures
-    r = compute(PayInputs(basic=Decimal("5000")))
-    assert (r.epf_employee, r.epf_employer) == (550, 650), r
-    assert (r.socso_employee, r.socso_employer) == (Decimal("24.75"), Decimal("86.65")), r
-    assert r.eis_employee == Decimal("9.90") and r.pcb == Decimal("110.00"), r
-    assert r.net_salary == Decimal("4305.35") and r.employer_cost == Decimal("5746.55"), r
-
-    # daily-rated: 100/day × 26 days = 2,600 base; allowance excluded from statutory
-    d = compute(PayInputs(count_by_day=True, rate=Decimal("100"), units=Decimal("26"),
-                          allowance_enabled=True, allowance=Decimal("300")))
-    assert d.base_earning == Decimal("2600.00") and d.gross == Decimal("2900.00"), d
-    assert d.statutory_wage == Decimal("2600.00") and d.epf_employee == 286, d   # 2600*11%
-
-    # hourly part-timer: 8/hr × 60 hrs, no statutory
-    h = compute(PayInputs(hourly=True, rate=Decimal("8"), units=Decimal("60"),
-                          epf_enabled=False, socso_enabled=False))
-    assert h.net_salary == Decimal("480.00") and h.epf_employee == 0, h
-    print("statutory self-test OK:", r.as_floats())
+if __name__ == "__main__":   # pragma: no cover
+    # The self-test moved to the pytest suite so it actually runs in CI and
+    # stays in step with the legislated rates (it had gone stale here before).
+    print("Statutory regression tests live in backend/tests/test_statutory.py — "
+          "run: .venv/bin/python -m pytest backend/tests -q")

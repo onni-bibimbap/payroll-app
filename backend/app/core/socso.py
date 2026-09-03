@@ -5,8 +5,11 @@ table is reproduced with ``contribution = round-to-5-sen(rate × band midpoint)`
 Category 1 (age < 60) charges employee 1.25% (Invalidity 0.5% + Non-Employment
 Injury/SKBBK 0.75%, per PERKESO Employer Circular No. 2 of 2026, effective
 1 June 2026) + employer 1.75% (Employment Injury 1.25% + Invalidity 0.5%);
-Category 2 (age >= 60) charges the employer 1.25% only. Verified against the
-RM2,550 / RM3,350 / RM5,000 rows of the official PERKESO table.
+Category 2 (age >= 60) charges the employer 1.25% only. Foreign workers are on
+the Employment Injury scheme only: employer 1.25%, no employee share. Verified
+against the RM2,550 / RM3,350 / RM5,000 rows of the official PERKESO table.
+Low-wage bands follow the official edges 30/50/70/100/140/200 before the RM100
+bands start at RM200.
 
 Caveat: round-to-5-sen(rate × midpoint) matches the official table almost
 everywhere but is not guaranteed at an exact halfway tie — e.g. the official
@@ -30,7 +33,7 @@ def band_midpoint(wage, cfg: RateConfig = DEFAULT_CONFIG) -> Decimal:
     w = min(D(wage), ceiling)
     if w <= 0:
         return Decimal("0")
-    edges = [0, 30, 50, 70] + list(range(100, int(ceiling) + 1, 100))
+    edges = [0, 30, 50, 70, 100, 140, 200] + list(range(300, int(ceiling) + 1, 100))
     for lo, hi in zip(edges, edges[1:]):
         if Decimal(lo) < w <= Decimal(hi):        # bands are exclusive-lower
             return (Decimal(lo) + Decimal(hi)) / 2
@@ -38,19 +41,27 @@ def band_midpoint(wage, cfg: RateConfig = DEFAULT_CONFIG) -> Decimal:
 
 
 def contribution(wage, over_60: bool = False, enabled: bool = True,
-                 cfg: RateConfig = DEFAULT_CONFIG) -> tuple[Decimal, Decimal]:
-    """Return ``(employee, employer)`` SOCSO contribution for the wage."""
+                 cfg: RateConfig = DEFAULT_CONFIG,
+                 foreign: bool = False) -> tuple[Decimal, Decimal]:
+    """Return ``(employee, employer)`` SOCSO contribution for the wage.
+
+    Foreign workers are covered by the Employment Injury scheme only
+    (employer pays, no employee share); it takes precedence over the
+    age-based Category 1/2 split.
+    """
     w = D(wage)
     if not enabled or w <= 0:
         return Decimal("0"), Decimal("0")
     mid = band_midpoint(w, cfg)
+    if foreign:                                   # Employment Injury scheme only
+        return Decimal("0"), round5(cfg.socso_foreign_er * mid)
     if over_60:                                   # Category 2 (employer only)
         return Decimal("0"), round5(cfg.socso_c2_er * mid)
     return round5(cfg.socso_c1_emp * mid), round5(cfg.socso_c1_er * mid)
 
 
 def explain(wage, over_60: bool = False, enabled: bool = True,
-            cfg: RateConfig = DEFAULT_CONFIG) -> str:
+            cfg: RateConfig = DEFAULT_CONFIG, foreign: bool = False) -> str:
     """Plain-English derivation of the SOCSO figures."""
     if not enabled:
         return "SOCSO not applied to this employee."
@@ -59,12 +70,17 @@ def explain(wage, over_60: bool = False, enabled: bool = True,
         return "No SOCSO wage, so no contribution."
     capped = min(w, cfg.socso_eis_ceiling)
     mid = band_midpoint(w, cfg)
-    emp, er = contribution(w, over_60, True, cfg)
-    cat = ("Category 2 (age ≥ 60): employer only" if over_60
-           else "Category 1 (age < 60): employee + employer")
+    emp, er = contribution(w, over_60, True, cfg, foreign)
+    if foreign:
+        cat = "Foreign worker: Employment Injury scheme, employer only"
+        rates = f"employer {pct(cfg.socso_foreign_er)}"
+    elif over_60:
+        cat = "Category 2 (age ≥ 60): employer only"
+        rates = f"employer {pct(cfg.socso_c2_er)}"
+    else:
+        cat = "Category 1 (age < 60): employee + employer"
+        rates = f"employee {pct(cfg.socso_c1_emp)} + employer {pct(cfg.socso_c1_er)}"
     cap_note = (f" (capped at the RM{cfg.socso_eis_ceiling:,.0f} ceiling)"
                 if w > cfg.socso_eis_ceiling else "")
-    rates = (f"employer {pct(cfg.socso_c2_er)}" if over_60
-             else f"employee {pct(cfg.socso_c1_emp)} + employer {pct(cfg.socso_c1_er)}")
     return (f"{cat}. Wage RM{capped:,.2f}{cap_note} falls in the band with assumed "
             f"wage RM{mid:,.2f}; {rates} → employee RM{emp:,.2f}, employer RM{er:,.2f}.")

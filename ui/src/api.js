@@ -8,6 +8,12 @@ export class ApiError extends Error {
   }
 }
 
+// Session-expiry hook: App registers a handler that clears the user so the
+// login form renders in place — the current URL (intended route) is preserved
+// and the router shows it again right after re-login (FE-07).
+let onUnauthorized = null
+export const setUnauthorizedHandler = (fn) => { onUnauthorized = fn }
+
 async function request(path, { method = 'GET', body } = {}) {
   const res = await fetch(path, {
     method,
@@ -21,6 +27,9 @@ async function request(path, { method = 'GET', body } = {}) {
     const detail = data?.detail
     const message = typeof detail === 'string' ? detail
       : detail?.message || `Request failed (${res.status})`
+    // auth endpoints handle their own 401s (bad password, initial /me probe)
+    if (res.status === 401 && !path.startsWith('/api/auth/') && onUnauthorized)
+      onUnauthorized()
     throw new ApiError(res.status, message, detail)
   }
   return data
@@ -33,13 +42,15 @@ export const api = {
   del: (p) => request(p, { method: 'DELETE' }),
 }
 
+// '-' is reserved for "no value" (null/undefined/''); a genuine 0 must render
+// as 0.00 — on a statutory pay document the two are not interchangeable (FE-08).
 export const money = (v) => {
-  const n = Number(v || 0)
-  return n ? n.toLocaleString('en-MY', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '-'
+  if (v === null || v === undefined || v === '') return '-'
+  return Number(v).toLocaleString('en-MY', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 export const money0 = (v) => {
-  const n = Number(v || 0)
-  return n ? n.toLocaleString('en-MY', { maximumFractionDigits: 0 }) : '-'
+  if (v === null || v === undefined || v === '') return '-'
+  return Number(v).toLocaleString('en-MY', { maximumFractionDigits: 0 })
 }
 
 export const BADGE = {

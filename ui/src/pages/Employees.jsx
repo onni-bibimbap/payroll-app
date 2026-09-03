@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, money } from '../api.js'
 import { useApp } from '../App.jsx'
+import { ErrorState, Loading } from '../components/Async.jsx'
 
 const STATUS_BADGE = {
   active: 'bg-emerald-100 text-emerald-700',
@@ -19,9 +20,14 @@ export default function Employees() {
   const [params, setParams] = useSearchParams()
   const show = params.get('show') || 'active'
   const [data, setData] = useState(null)
+  const [error, setError] = useState(null)
+  const [confirmId, setConfirmId] = useState(null)  // row awaiting deactivate confirm (FE-13)
 
-  const load = () => api.get(`/api/employees?show=${show}`).then(setData)
-    .catch((e) => flash(e.message, 'error'))
+  const load = () => {
+    setError(null)
+    return api.get(`/api/employees?show=${show}`).then(setData)
+      .catch((e) => { setError(e.message); flash(e.message, 'error') })
+  }
   useEffect(() => { load() }, [show])
 
   const toggle = async (e) => {
@@ -32,7 +38,8 @@ export default function Employees() {
     } catch (err) { flash(err.message, 'error') }
   }
 
-  if (!data) return null
+  if (error && !data) return <ErrorState message={error} retry={load} />
+  if (!data) return <Loading label="Loading employees…" />
 
   // employees touched in the last 2 months, newest first — surfaced for review
   const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth() - 2)
@@ -92,6 +99,10 @@ export default function Employees() {
             </tr>
           </thead>
           <tbody>
+            {data.employees.length === 0 && (
+              <tr><td colSpan="10" className="px-4 py-8 text-center text-slate-400">
+                No employees match this filter.</td></tr>
+            )}
             {data.employees.map((e) => (
               <tr key={e.id} className={'border-b last:border-0 hover:bg-slate-50 ' + (e.needs_review ? 'bg-amber-50' : '')}>
                 <td className="px-3 py-2 font-mono text-xs">{e.emp_code}</td>
@@ -118,9 +129,25 @@ export default function Employees() {
                   <>
                     <td className="px-3 py-2 text-right">
                       <Link to={`/employees/${e.id}`} className="text-brand-light hover:underline">Edit</Link></td>
-                    <td className="px-2 py-2">
-                      <button onClick={() => toggle(e)} className="text-xs text-slate-400 hover:text-red-600">
-                        {e.active ? 'Deactivate' : 'Activate'}</button></td>
+                    <td className="px-2 py-2 whitespace-nowrap">
+                      {/* deactivate is two-step: it silently excludes the person
+                          from future payroll runs, so no one-click accidents (FE-13) */}
+                      {!e.active ? (
+                        <button onClick={() => toggle(e)}
+                          className="text-xs text-slate-400 hover:text-emerald-600">Activate</button>
+                      ) : confirmId === e.id ? (
+                        <span className="inline-flex items-center gap-1.5 text-xs bg-red-50 border border-red-200 rounded-lg px-2 py-1">
+                          <span className="text-red-700">Exclude from new payroll runs?</span>
+                          <button onClick={() => { setConfirmId(null); toggle(e) }}
+                            className="font-semibold text-white bg-red-600 rounded px-2 py-0.5">Deactivate</button>
+                          <button onClick={() => setConfirmId(null)}
+                            className="text-slate-500 hover:underline">Cancel</button>
+                        </span>
+                      ) : (
+                        <button onClick={() => setConfirmId(e.id)}
+                          className="text-xs text-slate-400 hover:text-red-600">Deactivate</button>
+                      )}
+                    </td>
                   </>
                 ) : (<><td></td><td></td></>)}
               </tr>

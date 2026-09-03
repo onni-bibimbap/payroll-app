@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { api } from '../api.js'
 import { useApp } from '../App.jsx'
+import { ErrorState, Loading } from '../components/Async.jsx'
 
 const SEV = { blocker: 'bg-red-100 text-red-700', warning: 'bg-amber-100 text-amber-800', info: 'bg-slate-100 text-slate-600' }
 const inputCls = 'w-full rounded border border-slate-300 px-2 py-1.5 text-sm'
@@ -10,13 +11,33 @@ export default function HRDetail() {
   const { empId } = useParams()
   const { flash } = useApp()
   const [d, setD] = useState(null)
+  const [error, setError] = useState(null)
   const [approve, setApprove] = useState({ open: false, pay_type: 'monthly', basic_salary: '', hourly_rate: '', hire_date: new Date().toISOString().slice(0, 10) })
   const [resign, setResign] = useState({ open: false, resignation_notice_date: '', last_working_day: '' })
+  // GAP-06: ask the applicant to fix and re-send a bad submission
+  const [resub, setResub] = useState({ open: false, note: '', busy: false, error: null })
 
-  const load = useCallback(() => api.get(`/api/hr/employees/${empId}`).then(setD).catch((e) => flash(e.message, 'error')), [empId])
+  const load = useCallback(() => {
+    setError(null)
+    return api.get(`/api/hr/employees/${empId}`).then(setD)
+      .catch((e) => { setError(e.message); flash(e.message, 'error') })
+  }, [empId])
   useEffect(() => { load() }, [load])
-  if (!d) return null
+  if (error && !d) return <ErrorState message={error} retry={load} />
+  if (!d) return <Loading label="Loading employee…" />
   const e = d.employee
+
+  const requestResubmission = async () => {
+    setResub((r) => ({ ...r, busy: true, error: null }))
+    try {
+      await api.post(`/api/hr/employees/${e.id}/request-resubmission`, { note: resub.note })
+      setResub({ open: false, note: '', busy: false, error: null })
+      flash('Re-submission requested — the applicant will be asked to fix and re-send.')
+      await load()
+    } catch (err) {
+      setResub((r) => ({ ...r, busy: false, error: err.message }))
+    }
+  }
   const act = (fn) => async (...args) => {
     try { await fn(...args); await load() } catch (err) { flash(err.message, 'error') }
   }
@@ -31,6 +52,8 @@ export default function HRDetail() {
         {(e.status === 'pending_review' || e.status === 'applicant') && <>
           <button onClick={() => setApprove((a) => ({ ...a, open: !a.open, pay_type: e.employment_type === 'part_time' ? 'hourly' : 'monthly' }))}
             className="ml-auto rounded bg-emerald-600 text-white text-sm px-3 py-1.5">Approve…</button>
+          <button onClick={() => setResub((r) => ({ ...r, open: !r.open }))}
+            className="rounded bg-sky-600 text-white text-sm px-3 py-1.5">Request re-submission…</button>
           <button onClick={act(async () => { if (confirm('Reject this application?')) await api.post(`/api/hr/employees/${e.id}/reject`, { reason: prompt('Reason?') || '' }) })}
             className="rounded bg-red-600 text-white text-sm px-3 py-1.5">Reject</button>
         </>}
@@ -62,6 +85,31 @@ export default function HRDetail() {
         </div>
       )}
 
+      {resub.open && (
+        <div className="rounded-lg bg-sky-50 border border-sky-200 p-4 space-y-3">
+          <label className="block text-sm font-medium">
+            What should the applicant fix or re-send?
+            <textarea rows="2" className={inputCls + ' mt-1'} value={resub.note}
+              placeholder="e.g. NRIC photo is unreadable — please re-upload both sides"
+              onChange={(ev) => setResub((r) => ({ ...r, note: ev.target.value }))} />
+          </label>
+          {resub.error && (
+            <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5">{resub.error}</p>
+          )}
+          <div className="flex items-center gap-2">
+            <button onClick={requestResubmission} disabled={resub.busy || !resub.note.trim()}
+              className="rounded bg-sky-600 text-white text-sm px-3 py-2 disabled:opacity-50">
+              {resub.busy ? 'Sending…' : 'Send re-submission request'}</button>
+            <button onClick={() => setResub({ open: false, note: '', busy: false, error: null })}
+              className="text-sm text-slate-500 hover:underline">Cancel</button>
+          </div>
+          <p className="text-xs text-slate-500">
+            Raises a <span className="font-mono">resubmission_requested</span> flag on this
+            application so it stays visible in the queue until resolved.
+          </p>
+        </div>
+      )}
+
       {resign.open && (
         <div className="rounded-lg bg-amber-50 border border-amber-200 p-4 grid sm:grid-cols-4 gap-3 items-end">
           <label className="text-sm">Notice date<input type="date" className={inputCls} value={resign.resignation_notice_date} onChange={(ev) => setResign((r) => ({ ...r, resignation_notice_date: ev.target.value }))} /></label>
@@ -88,7 +136,8 @@ export default function HRDetail() {
             <div key={f.id} className="flex items-start gap-2 py-1.5 border-b border-slate-100 last:border-0 text-sm">
               <span className={'text-xs rounded px-1.5 py-0.5 shrink-0 ' + (SEV[f.severity] || SEV.info)}>{f.severity}</span>
               <div className="flex-1">
-                <span className="font-medium">{f.flag_type}</span>
+                <span className={'font-medium' + (f.flag_type === 'resubmission_requested' ? ' text-sky-700' : '')}>
+                  {f.flag_type}</span>
                 {f.details?.note && <span className="block text-xs text-slate-500">{f.details.note}</span>}
               </div>
               {f.status === 'open' ? (

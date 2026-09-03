@@ -33,6 +33,23 @@ def _m(v) -> str:
     return f"{d:,.2f}" if d else "-"
 
 
+def deduction_rows(slip: Payslip) -> list[tuple[str, Decimal]]:
+    """Itemized employee deductions whose sum equals total_employee_deduction.
+
+    Includes the LINDUNG 24Jam line whenever it is non-zero (STAT-11) so the
+    printed rows always reconcile with the payslip total.
+    """
+    rows: list[tuple[str, Decimal]] = [
+        ("EPF / KWSP", slip.epf_employee), ("SOCSO", slip.socso_employee),
+        ("EIS", slip.eis_employee), ("PCB (tax)", slip.pcb)]
+    if slip.lindung_optin and (slip.lindung_amount or 0) > 0:
+        rows.append(("LINDUNG 24Jam", slip.lindung_amount))
+    if slip.deduction_enabled and slip.deduction_amount:
+        rows.append((f"Deduction — {slip.deduction_reason or 'other'}",
+                     slip.deduction_amount))
+    return rows
+
+
 def payslip_pdf(slip: Payslip, run: PayrollRun) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=18 * mm, bottomMargin=18 * mm,
@@ -88,12 +105,8 @@ def payslip_pdf(slip: Payslip, run: PayrollRun) -> bytes:
     el.append(section("EARNINGS", earnings, "Gross earnings (incl. OT)",
                       slip.total_remuneration, GREEN))
     el.append(Spacer(1, 8))
-    deductions = [("EPF / KWSP", slip.epf_employee), ("SOCSO", slip.socso_employee),
-                  ("EIS", slip.eis_employee), ("PCB (tax)", slip.pcb)]
-    if slip.deduction_enabled and slip.deduction_amount:
-        deductions.append((f"Deduction — {slip.deduction_reason or 'other'}", slip.deduction_amount))
-    el.append(section("EMPLOYEE DEDUCTIONS", deductions, "Total deductions",
-                      slip.total_employee_deduction, NAVY))
+    el.append(section("EMPLOYEE DEDUCTIONS", deduction_rows(slip),
+                      "Total deductions", slip.total_employee_deduction, NAVY))
     el.append(Spacer(1, 8))
 
     net = Table([["NET SALARY (take-home)", _m(slip.net_salary)]],
@@ -106,6 +119,10 @@ def payslip_pdf(slip: Payslip, run: PayrollRun) -> bytes:
     ]))
     el.append(net)
     el.append(Spacer(1, 10))
+
+    if slip.notes:                          # e.g. the DEC-006 proration basis
+        el.append(Paragraph(f"Note: {slip.notes}", _SMALL))
+        el.append(Spacer(1, 6))
 
     el.append(section("EMPLOYER CONTRIBUTIONS (not deducted from employee)", [
         ("EPF / KWSP (12–13%)", slip.epf_employer), ("SOCSO", slip.socso_employer),

@@ -1,11 +1,29 @@
+# Onni Payroll compose stack.
+#
+# Profiles (infra_skills contract):
+#   dev  — `make up`. Local Postgres only (never Supabase), demo data via
+#          `make seed`, app exposed on http://localhost:8077.
+#   test — `make test`. Ephemeral throwaway db (tmpfs, no volume), applies
+#          migrations, runs the backend pytest suite in the same image, exits.
+#   prod — `docker compose --profile prod up -d --wait`. Requires DATABASE_URL
+#          and PAYROLL_SECRET in .env — there are NO in-file defaults for
+#          them. Supabase is the explicit override via .env, never a silent
+#          default. No seeding.
+#
+# The local db service always starts (no profile gate); its data lives in the
+# named volume `pgdata`. `docker compose down` keeps data — only
+# `make clean CONFIRM=wipe-data` destroys the volume.
+
 services:
   db:
-    image: postgres:16-alpine
-    profiles: ["local-db"]        # only started with: docker compose --profile local-db up
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    restart: unless-stopped
     environment:
       POSTGRES_DB: payroll
       POSTGRES_USER: payroll
-      POSTGRES_PASSWORD: payroll
+      # Local-only credential; override in .env. Never published outside the
+      # compose network (no ports:) — use `make psql` for admin access.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payroll}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -14,25 +32,190 @@ services:
       timeout: 3s
       retries: 20
 
-  backend:
-    build: ./backend
+  # One-shot migration runner: applies supabase/migrations/*.sql in order with
+  # a schema_migrations tracking table (idempotent). This instance always
+  # targets the LOCAL db so `make up` can never migrate Supabase by accident;
+  # migrate-prod (below) is the explicit prod path.
+  migrate:
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    restart: "no" # one-shot: must exit so service_completed_successfully fires
     environment:
-      # From .env — points at Supabase; falls back to the local db service.
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://payroll:payroll@db:5432/payroll}
-      PAYROLL_SECRET: ${PAYROLL_SECRET:-change-me-in-production}
+      DATABASE_URL: postgresql://payroll:${POSTGRES_PASSWORD:-payroll}@db:5432/payroll
+    volumes:
+      - ./supabase/migrations:/migrations:ro
+      - ./scripts/migrate.sh:/usr/local/bin/migrate.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/migrate.sh"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backend:
+    profiles: ["dev"]
+    build:
+      context: ./backend
+      target: runtime
+    restart: unless-stopped
+    environment:
+      APP_ENV: development
+      # dev is pinned to the local compose db — never Supabase (INFRA-02).
+      DATABASE_URL: postgresql+psycopg2://payroll:${POSTGRES_PASSWORD:-payroll}@db:5432/payroll
+      PAYROLL_SECRET: ${PAYROLL_SECRET:-dev-only-secret-not-for-production}
       PAYROLL_COMPANY: ${PAYROLL_COMPANY:-Onni}
-      # Supabase Storage (private employee-docs bucket) — optional
-      SUPABASE_URL: ${SUPABASE_URL:-}
-      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # dev never talks to Supabase Storage / Google Sheets.
+      SUPABASE_URL: ""
+      SUPABASE_SERVICE_KEY: ""
+      GOOGLE_SHEET_ID: ""
     expose:
       - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   ui:
+    profiles: ["dev"]
     build: ./ui
+    restart: unless-stopped
     ports:
       - "8077:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:80/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+
+  # ------------------------------------------------------------------ test --
+  # Ephemeral db on tmpfs: nothing survives the run, pgdata is untouched.
+  db-test:
+    profiles: ["test"]
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    restart: "no"
+    environment:
+      POSTGRES_DB: payroll
+      POSTGRES_USER: payroll
+      POSTGRES_PASSWORD: payroll
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payroll -d payroll"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate-test:
+    profiles: ["test"]
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql://payroll:payroll@db-test:5432/payroll
+    volumes:
+      - ./supabase/migrations:/migrations:ro
+      - ./scripts/migrate.sh:/usr/local/bin/migrate.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/migrate.sh"]
+    depends_on:
+      db-test:
+        condition: service_healthy
+
+  # Runs the backend pytest suite in the same runtime image (+ pytest layer),
+  # then exits; `make test` propagates the exit code.
+  backend-test:
+    profiles: ["test"]
+    build:
+      context: ./backend
+      target: test
+    restart: "no"
+    environment:
+      APP_ENV: test
+      DATABASE_URL: postgresql+psycopg2://payroll:payroll@db-test:5432/payroll
+      PAYROLL_SECRET: test-secret-not-for-production
+      PAYROLL_COMPANY: Onni
+    volumes:
+      - ./backend/tests:/srv/tests:ro
+    command: ["python", "-m", "pytest", "tests", "-q"]
+    depends_on:
+      db-test:
+        condition: service_healthy
+      migrate-test:
+        condition: service_completed_successfully
+
+  # ------------------------------------------------------------------ prod --
+  migrate-prod:
+    profiles: ["prod"]
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    restart: "no"
+    environment:
+      # No default: scripts/migrate.sh exits 1 when DATABASE_URL is empty.
+      DATABASE_URL: ${DATABASE_URL-}
+    volumes:
+      - ./supabase/migrations:/migrations:ro
+      - ./scripts/migrate.sh:/usr/local/bin/migrate.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/migrate.sh"]
+
+  backend-prod:
+    profiles: ["prod"]
+    build:
+      context: ./backend
+      target: runtime
+    restart: unless-stopped
+    networks:
+      default:
+        aliases:
+          - backend # ui/nginx.conf proxies to http://backend:8000
+    environment:
+      APP_ENV: production
+      # Required from .env — no in-file defaults (SEC-01/INFRA-12); the
+      # command guard below refuses to boot when either is empty.
+      DATABASE_URL: ${DATABASE_URL-}
+      PAYROLL_SECRET: ${PAYROLL_SECRET-}
+      PAYROLL_COMPANY: ${PAYROLL_COMPANY:-Onni}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SUPABASE_URL: ${SUPABASE_URL-}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY-}
+      GOOGLE_SHEET_ID: ${GOOGLE_SHEET_ID-}
+    command: >
+      sh -c 'if [ -z "$$DATABASE_URL" ] || [ -z "$$PAYROLL_SECRET" ]; then
+      echo "FATAL: the prod profile requires DATABASE_URL and PAYROLL_SECRET in .env (no defaults are shipped)." >&2;
+      exit 1; fi;
+      exec uvicorn app.main:app --host 0.0.0.0 --port 8000'
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      migrate-prod:
+        condition: service_completed_successfully
+
+  ui-prod:
+    profiles: ["prod"]
+    build: ./ui
+    restart: unless-stopped
+    ports:
+      - "8077:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:80/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      backend-prod:
+        condition: service_healthy
 
 volumes:
   pgdata:

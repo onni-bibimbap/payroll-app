@@ -1,18 +1,22 @@
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react'
+import React, { Suspense, createContext, lazy, useCallback, useContext, useEffect, useState } from 'react'
 import { Link, Navigate, NavLink, Route, Routes, useLocation } from 'react-router-dom'
-import { api } from './api.js'
-import Login from './pages/Login.jsx'
-import PayrollList from './pages/PayrollList.jsx'
-import PayrollRun from './pages/PayrollRun.jsx'
-import Dashboard from './pages/Dashboard.jsx'
-import Payslip from './pages/Payslip.jsx'
-import Employees from './pages/Employees.jsx'
-import EmployeeForm from './pages/EmployeeForm.jsx'
-import Settings from './pages/Settings.jsx'
-import Register from './pages/Register.jsx'
-import HRQueue from './pages/HRQueue.jsx'
-import HRDetail from './pages/HRDetail.jsx'
-import HRCompliance from './pages/HRCompliance.jsx'
+import { api, setUnauthorizedHandler } from './api.js'
+import { Loading } from './components/Async.jsx'
+
+// Route-level code splitting (FE-09): each page is its own chunk, so the
+// public /register PWA never downloads the admin payroll bundle.
+const Login = lazy(() => import('./pages/Login.jsx'))
+const PayrollList = lazy(() => import('./pages/PayrollList.jsx'))
+const PayrollRun = lazy(() => import('./pages/PayrollRun.jsx'))
+const Dashboard = lazy(() => import('./pages/Dashboard.jsx'))
+const Payslip = lazy(() => import('./pages/Payslip.jsx'))
+const Employees = lazy(() => import('./pages/Employees.jsx'))
+const EmployeeForm = lazy(() => import('./pages/EmployeeForm.jsx'))
+const Settings = lazy(() => import('./pages/Settings.jsx'))
+const Register = lazy(() => import('./pages/Register.jsx'))
+const HRQueue = lazy(() => import('./pages/HRQueue.jsx'))
+const HRDetail = lazy(() => import('./pages/HRDetail.jsx'))
+const HRCompliance = lazy(() => import('./pages/HRCompliance.jsx'))
 
 const AppCtx = createContext(null)
 export const useApp = () => useContext(AppCtx)
@@ -77,6 +81,19 @@ export default function App() {
     setMessages((ms) => [...ms, { msg, level }])
     setTimeout(() => setMessages((ms) => ms.slice(1)), 5000)
   }, [])
+
+  // Session expiry (FE-07): any API 401 drops back to the login form in place.
+  // The URL is untouched, so the intended route renders again after re-login.
+  useEffect(() => {
+    let handled = false // several in-flight requests may 401 together
+    setUnauthorizedHandler(() => {
+      if (!user || handled) return
+      handled = true
+      setUser(null)
+      flash('Session expired — please sign in again.', 'error')
+    })
+    return () => setUnauthorizedHandler(null)
+  }, [user, flash])
   const dismiss = (i) => setMessages((ms) => ms.filter((_, j) => j !== i))
 
   // clear flashes on navigation
@@ -88,7 +105,11 @@ export default function App() {
 
   // public registration PWA — reachable with or without a session
   if (location.pathname.startsWith('/register')) {
-    return <AppCtx.Provider value={ctx}><Register /></AppCtx.Provider>
+    return (
+      <AppCtx.Provider value={ctx}>
+        <Suspense fallback={<Loading />}><Register /></Suspense>
+      </AppCtx.Provider>
+    )
   }
 
   if (!user) {
@@ -96,7 +117,7 @@ export default function App() {
       <AppCtx.Provider value={ctx}>
         <main className="max-w-7xl mx-auto px-5 py-6">
           <Flashes />
-          <Login />
+          <Suspense fallback={<Loading />}><Login /></Suspense>
         </main>
       </AppCtx.Provider>
     )
@@ -106,6 +127,7 @@ export default function App() {
       <Nav />
       <main className="max-w-7xl mx-auto px-5 py-6">
         <Flashes />
+        <Suspense fallback={<Loading />}>
         <Routes>
           <Route path="/" element={<Navigate to="/payroll" replace />} />
           <Route path="/login" element={<Navigate to="/payroll" replace />} />
@@ -124,6 +146,7 @@ export default function App() {
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/payroll" replace />} />
         </Routes>
+        </Suspense>
       </main>
     </AppCtx.Provider>
   )

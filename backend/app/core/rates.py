@@ -14,7 +14,15 @@ SOCSO_EIS_CEILING = Decimal("6000")      # since 1 Oct 2024
 SOCSO_C1_EMP = Decimal("0.0125")         # Invalidity 0.5% + Non-Employment Injury/SKBBK 0.75%
 SOCSO_C1_ER = Decimal("0.0175")          # Employment Injury 1.25% + Invalidity 0.5%
 SOCSO_C2_ER = Decimal("0.0125")          # age >= 60, employee share = 0
+SOCSO_FOREIGN_ER = Decimal("0.0125")     # foreign: Employment Injury, employer only
 EIS_RATE = Decimal("0.002")
+# Age-60+ (Malaysian) and foreign-worker EPF branches. Derived from the KWSP
+# schedules current as of the Oct 2025 changes (foreign-worker EPF mandatory
+# at 2%/2%); verify against the live KWSP Third Schedule before a real run.
+EPF_EMP_RATE_OVER_60 = Decimal("0")      # Malaysian >= 60: employee share nil
+EPF_ER_RATE_OVER_60 = Decimal("0.04")    # Malaysian >= 60: employer 4%
+EPF_EMP_RATE_FOREIGN = Decimal("0.02")   # foreign worker, mandatory since Oct 2025
+EPF_ER_RATE_FOREIGN = Decimal("0.02")
 PERSONAL_RELIEF = Decimal("9000")
 EPF_RELIEF_CAP = Decimal("4000")
 TAX_REBATE = Decimal("400")
@@ -47,7 +55,12 @@ class RateConfig:
     socso_c1_emp: Decimal = SOCSO_C1_EMP
     socso_c1_er: Decimal = SOCSO_C1_ER
     socso_c2_er: Decimal = SOCSO_C2_ER
+    socso_foreign_er: Decimal = SOCSO_FOREIGN_ER
     eis_rate: Decimal = EIS_RATE
+    epf_emp_rate_over_60: Decimal = EPF_EMP_RATE_OVER_60
+    epf_er_rate_over_60: Decimal = EPF_ER_RATE_OVER_60
+    epf_emp_rate_foreign: Decimal = EPF_EMP_RATE_FOREIGN
+    epf_er_rate_foreign: Decimal = EPF_ER_RATE_FOREIGN
     personal_relief: Decimal = PERSONAL_RELIEF
     epf_relief_cap: Decimal = EPF_RELIEF_CAP
     tax_rebate: Decimal = TAX_REBATE

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api, money, money0, BADGE } from '../api.js'
 import { useApp } from '../App.jsx'
+import { ErrorState, Loading } from '../components/Async.jsx'
 
 const SEGS = [
   ['Net', 'net_salary', '#548235'], ['EPF', 'epf_employee', '#1F3864'],
@@ -24,14 +25,19 @@ export default function Dashboard() {
   const { user, flash } = useApp()
   const nav = useNavigate()
   const [d, setD] = useState(null)
+  const [error, setError] = useState(null)
   const [rejectOpen, setRejectOpen] = useState(false)
   const [rejectNote, setRejectNote] = useState('')
 
-  const load = () => api.get(`/api/runs/${runId}/dashboard`).then(setD)
-    .catch((e) => flash(e.message, 'error'))
+  const load = () => {
+    setError(null)
+    return api.get(`/api/runs/${runId}/dashboard`).then(setD)
+      .catch((e) => { setError(e.message); flash(e.message, 'error') })
+  }
   useEffect(() => { load() }, [runId])
 
-  if (!d) return null
+  if (error && !d) return <ErrorState message={error} retry={load} />
+  if (!d) return <Loading label="Loading dashboard…" />
   const { run, slips, totals, by_bank, breakdowns, settings } = d
   const maxbank = by_bank.length ? by_bank[0].amount : 1
   const pct = (v) => (Number(v) * 100)

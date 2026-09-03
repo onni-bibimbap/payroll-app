@@ -141,12 +141,19 @@ cython_debug/
 *.swo
 *~
 
-# Excel files (optional - uncomment if you don't want to track them)
-# *.xlsx
-# *.xls
+# Data / PII — never track spreadsheets, databases or dumps (SEC-09/INFRA-08/
+# GAP-07). Real employee data must never enter git.
+*.xlsx
+*.xls
+*.db
+*.db.*
+backups/
+2607/
+JUNE_2026_PAYROLL_ANALYSIS.md
 
 # Screenshots
 *.png
 *.jpg
 *.jpeg
 node_modules/
+dist/

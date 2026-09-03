@@ -1,4 +1,18 @@
+# Never let data or PII files into the build context (SEC-09/INFRA-08).
+*.xlsx
+*.xls
+*.db
+*.db.*
+*.sqlite3
+payroll.db
+
+# Local tooling / caches
 __pycache__
 *.pyc
-payroll.db
 .venv
+.pytest_cache
+.mypy_cache
+.env
+
+# Tests are mounted by the compose test profile, not baked into the image.
+tests

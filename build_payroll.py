@@ -1,7 +1,17 @@
-"""Build a formula-driven Malaysia monthly payroll workbook.
+"""DEPRECATED — legacy spreadsheet builder, pending removal (proposal P-4).
 
-Generates ``emp_payroll_2606.xlsx`` from the master employee list and the
-June 2026 input image (``payroll_2606.png``).  All statutory contributions
+This script predates the FastAPI payroll engine (``backend/app``), which is
+the single source of truth for statutory computation. It is retained only as
+a reference until proposal P-4 removes it. Do NOT use it for real pay runs.
+
+The employee roster below is SYNTHETIC demo data (Ali Demo, Siti Contoh, ...
+with all-zero bank accounts); real employee data must never be committed
+here (GAP-07/SEC-09).
+
+Build a formula-driven Malaysia monthly payroll workbook.
+
+Generates ``emp_payroll_2606.xlsx`` from the demo employee list.
+All statutory contributions
 (EPF/KWSP, SOCSO/PERKESO, EIS and PCB) are derived with Excel formulas that
 reference an auditable ``Rates`` sheet, so the file recalculates whenever the
 monthly inputs change.
@@ -314,53 +324,30 @@ def emp(id, name, bank, acct, type, epf, socso, basic=0, petrol=0, incentive=0,
 
 
 V = "verify"   # convenience
+# SYNTHETIC demo roster only (GAP-07): clearly fake names, all-zero bank
+# accounts. Never commit real employee data here.
 employees = [
-    # --- Permanent / salaried (printed rows in the image) ------------------
-    emp("ON00010", "cheong fong cheng", "Cimb", "7000986177", "Permanent", "Y", "Y",
+    # --- Permanent / salaried ---------------------------------------------
+    emp("DEMO001", "Ali Demo", "Demo Bank", "000000000001", "Permanent", "Y", "Y",
+        basic=2600,
+        verify={"Petrol\nAllow": "Demo row — enter RM if applicable."}),
+    emp("DEMO002", "Siti Contoh", "Demo Bank", "000000000002", "Permanent", "Y", "Y",
+        basic=3100, incentive=200, ot_hours=10, ot_rate=15,
+        verify={"OT\nHours": "Demo row — confirm OT hours."}),
+    emp("DEMO006", "Ahmad Contoh", "Demo Bank", "000000000006", "Permanent", "Y", "Y",
         basic=5000,
-        verify={"Petrol\nAllow": "Image shows a petrol tick (no amount) — enter RM if applicable."}),
-    emp("ON00011", "mohd shah putra danial", "Maybank", "112205095227", "Permanent", "Y", "Y",
-        basic=3200,
-        verify={"Basic": "Basic cell was whited-out in the June image — verify amount / whether paid."}),
-    emp("ON00012", "mohd hafizal bin azahar", "Public Bank", "4798247316", "Permanent", "Y", "Y",
-        basic=3000, incentive=200, ot_rate=15,
-        verify={"OT\nHours": "Image note '+200 for OT' — enter OT hours (rate 15) or use PCB/OT as needed."}),
-    emp("ON00013", "Nur Azaharina Binti Azahar", "Bank Muamalat", "3060002590765", "Permanent", "Y", "Y",
-        basic=2200,
-        verify={"Basic": "Basic cell was whited-out in the June image — verify amount / whether paid."}),
-    emp("ON00015", "Chin Ching Hua", "Public Bank", "5016571402", "Permanent", "Y", "Y",
-        basic=2200, ot_hours=25.5, ot_rate=15,
-        verify={"Basic": "Basic whited-out in image — verify.",
-                "OT\nHours": "Image shows OT 25.5 x 15 = 382.50 near this row — confirm it is this employee."}),
-    emp("ON00022", "Mohd Aminludin Bin Yahya", "Maybank", "164061840677", "Permanent", "Y", "Y",
-        basic=2400, incentive=200, ot_hours=22.5, ot_rate=15,
-        verify={"OT\nHours": "Image shows OT 22.5 x 15 = 337.50 near this row — confirm it is this employee."}),
-    emp("ON00023", "Nur Alya Adriana", "Maybank", "564593318369", "Permanent", "Y", "Y",
-        basic=2100,
-        verify={"Basic": "Basic cell was whited-out in the June image — verify amount / whether paid."}),
-    emp("ON00028", "Tan Kui Thean", "Maybank", "164061854800", "Permanent", "Y", "Y",
-        basic=3200, ot_rate=15,
-        verify={"Petrol\nAllow": "Image shows a petrol tick — enter RM if applicable."}),
-    # --- Part-time / hourly (printed, lower rows) --------------------------
-    emp("ON00030", "HOU CHING", "Public Bank", "5102691912", "Part-time", "N", "N",
-        ot_rate=8,
-        verify={"OT\nHours": "Part-timer paid hours x RM8 — enter June hours from image."}),
-    emp("ON00031", "Aron cheng Eng", "Cimb", "7657001861", "Part-time", "N", "N",
-        ot_rate=8,
-        verify={"OT\nHours": "Part-timer paid hours x RM8 — enter June hours from image."}),
-    # --- Hand-written part-time / hourly block (clearly legible) -----------
-    emp("", "Liew Chen Hao", "Cimb", "", "Part-time", "N", "N", ot_hours=51, ot_rate=8),
-    emp("", "Tai Jun Xi", "Cash", "", "Part-time", "N", "N", ot_hours=41, ot_rate=8),
-    emp("ON00055", "Nay Lin Zaw", "Merchantrade", "500001618970", "Part-time", "N", "N",
+        verify={"Basic": "Demo row above the RM5,000 EPF employer-rate threshold."}),
+    # --- Part-time / hourly ------------------------------------------------
+    emp("DEMO003", "Kumar Ujian", "Demo Bank", "000000000003", "Part-time", "N", "N",
+        ot_hours=80, ot_rate=8,
+        verify={"OT\nHours": "Part-timer paid hours x RM8 — demo row."}),
+    emp("DEMO004", "Mei Contoh", "Demo Bank", "000000000004", "Part-time", "N", "N",
+        ot_hours=45, ot_rate=8),
+    emp("DEMO005", "Aung Demo", "Demo Bank", "000000000005", "Part-time", "N", "N",
         basic=2300, workdays=26,
-        note="Foreign worker (per May sheet). SOCSO Employment-Injury applies to foreign "
+        note="Foreign-worker example. SOCSO Employment-Injury applies to foreign "
              "workers; EPF 2% mandatory from Oct 2025 — toggle 'Apply' columns to Y if needed.",
-        verify={"Basic": "Image shows 2300 — confirm monthly wage / any unpaid days."}),
-    emp("", "Ong Peir Ann", "Public Bank", "5097798113", "Part-time", "N", "N", ot_hours=210, ot_rate=8),
-    emp("", "Thulasi Raj", "Cimb", "7651498174", "Part-time", "N", "N", ot_hours=4, ot_rate=8),
-    emp("", "Shannen Marie Gomez", "Maybank", "", "Part-time", "N", "N", ot_hours=7, ot_rate=8),
-    emp("", "Soh Jia Mon", "Public Bank", "5089470408", "Part-time", "N", "N", ot_hours=28, ot_rate=8),
-    emp("", "Chee Wei Hong", "Maybank", "", "Part-time", "N", "N", ot_hours=87, ot_rate=8),
+        verify={"Basic": "Demo row — confirm monthly wage / any unpaid days."}),
 ]
 
 # Header -> field name for input columns
@@ -565,7 +552,7 @@ lines = [
     ("PART-TIME / HOURLY STAFF", "h"),
     ("For hourly staff, leave Basic = 0, put hours in 'OT Hours' and the hourly rate in 'OT Rate'; "
      "pay = hours x rate. 'Apply EPF?' and 'Apply SOCSO+EIS?' are defaulted to N — set to Y if they are covered.", "n"),
-    ("Foreign workers (e.g. Nay Lin Zaw): SOCSO Employment-Injury applies, and EPF becomes mandatory at 2% from Oct 2025. "
+    ("Foreign workers (e.g. Aung Demo): SOCSO Employment-Injury applies, and EPF becomes mandatory at 2% from Oct 2025. "
      "Switch the 'Apply' columns to Y and adjust rates on the 'Rates' sheet as needed.", "n"),
     ("", ""),
     ("COLOUR KEY", "h"),

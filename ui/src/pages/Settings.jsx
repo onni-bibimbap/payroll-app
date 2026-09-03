@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { useApp } from '../App.jsx'
+import { ErrorState, Loading } from '../components/Async.jsx'
 
 // field -> kind; pct fields are fractions in the API, shown as % here
 const KINDS = {
@@ -16,19 +17,23 @@ const KINDS = {
 export default function Settings() {
   const { flash, setCompany } = useApp()
   const [form, setForm] = useState(null)   // display values (% for pct)
+  const [error, setError] = useState(null)
   const [unlocked, setUnlocked] = useState(false)
 
-  useEffect(() => {
-    api.get('/api/settings').then((s) => {
+  const load = () => {
+    setError(null)
+    return api.get('/api/settings').then((s) => {
       const f = {}
       for (const [k, kind] of Object.entries(KINDS)) {
         f[k] = kind === 'pct' ? String(+((Number(s[k]) * 100).toFixed(6))) : (kind === 'bool' ? !!s[k] : String(s[k] ?? ''))
       }
       setForm(f)
-    }).catch((e) => flash(e.message, 'error'))
-  }, [])
+    }).catch((e) => { setError(e.message); flash(e.message, 'error') })
+  }
+  useEffect(() => { load() }, [])
 
-  if (!form) return null
+  if (error && !form) return <ErrorState message={error} retry={load} />
+  if (!form) return <Loading label="Loading settings…" />
 
   const set = (k) => (e) =>
     setForm((f) => ({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value }))

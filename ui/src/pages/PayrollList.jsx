@@ -2,21 +2,25 @@ import React, { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api, money, BADGE, MONTHS } from '../api.js'
 import { useApp } from '../App.jsx'
+import { ErrorState, Loading } from '../components/Async.jsx'
 
 export default function PayrollList() {
   const { user, flash } = useApp()
   const nav = useNavigate()
   const [data, setData] = useState(null)
+  const [error, setError] = useState(null)
   const [month, setMonth] = useState(new Date().getMonth() + 1)
   const [year, setYear] = useState(new Date().getFullYear())
   const [workDays, setWorkDays] = useState(26)
 
-  useEffect(() => {
-    api.get('/api/runs').then((d) => {
+  const load = () => {
+    setError(null)
+    return api.get('/api/runs').then((d) => {
       setData(d)
       setMonth(d.this_month); setYear(d.this_year); setWorkDays(d.default_work_days)
-    }).catch((e) => flash(e.message, 'error'))
-  }, [])
+    }).catch((e) => { setError(e.message); flash(e.message, 'error') })
+  }
+  useEffect(() => { load() }, [])
 
   const create = async (e) => {
     e.preventDefault()
@@ -30,7 +34,8 @@ export default function PayrollList() {
     }
   }
 
-  if (!data) return null
+  if (error && !data) return <ErrorState message={error} retry={load} />
+  if (!data) return <Loading label="Loading payroll runs…" />
   return (
     <>
       <div className="flex items-center mb-4">

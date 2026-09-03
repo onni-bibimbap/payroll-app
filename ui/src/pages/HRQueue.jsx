@@ -2,12 +2,18 @@ import React, { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api.js'
 import { useApp } from '../App.jsx'
+import { ErrorState, Loading } from '../components/Async.jsx'
 
 export default function HRQueue() {
   const { flash } = useApp()
   const [queue, setQueue] = useState(null)
+  const [error, setError] = useState(null)
   const [syncing, setSyncing] = useState(false)
-  const load = () => api.get('/api/hr/queue').then((d) => setQueue(d.queue))
+  const load = () => {
+    setError(null)
+    return api.get('/api/hr/queue').then((d) => setQueue(d.queue))
+      .catch((e) => { setError(e.message); flash(e.message, 'error') })
+  }
   useEffect(() => { load() }, [])
 
   const sync = async () => {
@@ -20,7 +26,8 @@ export default function HRQueue() {
     } catch (e) { flash(e.message, 'error') } finally { setSyncing(false) }
   }
 
-  if (!queue) return null
+  if (error && !queue) return <ErrorState message={error} retry={load} />
+  if (!queue) return <Loading label="Loading review queue…" />
   return (
     <div>
       <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
@@ -43,6 +50,8 @@ export default function HRQueue() {
             <span className="text-sm text-slate-500 hidden sm:inline">{r.position || '—'}</span>
             {r.identity_type !== 'nric' &&
               <span className="text-xs rounded px-2 py-0.5 bg-violet-100 text-violet-700">{r.identity_type}</span>}
+            {(r.flag_types || []).includes('resubmission_requested') &&
+              <span className="text-xs rounded px-2 py-0.5 bg-sky-100 text-sky-700">resubmission requested</span>}
             {r.blockers > 0 &&
               <span className="text-xs rounded px-2 py-0.5 bg-red-100 text-red-700">{r.blockers} blocker{r.blockers > 1 ? 's' : ''}</span>}
             <span className="text-xs rounded px-2 py-0.5 bg-amber-100 text-amber-800">{r.open_flags} open</span>
