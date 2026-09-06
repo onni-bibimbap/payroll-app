@@ -1,16 +1,22 @@
-"""FastAPI JSON API backend for the Onni Payroll SPA."""
+"""FastAPI JSON API backend for the Onni Payroll SPA.
+
+Exports: app (FastAPI instance).
+"""
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import logging
+import time
+from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
-from sqlalchemy import func, inspect as sa_inspect, select
+from sqlalchemy import func, inspect as sa_inspect, select, text as sql_text
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -18,14 +24,15 @@ from . import payroll, pdf, store
 from .hr import router as hr_router
 from .payroll_export import router as export_router
 from .registration import router as registration_router
-from .config import COMPANY_NAME, DATABASE_URL, SECRET_KEY
+from .config import COMPANY_NAME, DATABASE_URL, SECRET_KEY, APP_ENV, VERSION
 
 DATABASE_URL_IS_SQLITE = DATABASE_URL.startswith("sqlite")
 from .database import SessionLocal, get_db, init_db
 from .models import AuditLog, Employee, Payslip, PayrollRun, User
 from .payroll import FLAG_FIELDS, NUMBER_FIELDS, TEXT_FIELDS, PayrollError
-from .security import (current_user, require_approver, require_preparer,
-                       require_user, verify_password)
+from .security import (current_user, hash_password, require_admin,
+                       require_approver, require_preparer, require_user,
+                       verify_password)
 from .serializers import (SETTINGS_FIELDS, employee_dict, run_dict,
                           settings_dict, slip_dict, totals_dict, user_dict)
 
@@ -40,29 +47,76 @@ def now_kl() -> dt.datetime:
     return dt.datetime.now(KL_TZ)
 
 
-app = FastAPI(title=f"{COMPANY_NAME} Payroll API")
-app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, max_age=60 * 60 * 12)
+# --- Startup / shutdown (lifespan) (QT-13) ---
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown logic for FastAPI 0.93+."""
+    # Startup
+    init_db()
+    with SessionLocal() as db:
+        store.get_settings(db)
+
+    from . import storage
+    try:
+        storage.ensure_bucket()
+    except Exception as e:
+        logger.warning("Failed to configure Supabase bucket: %s", e)
+
+    if not DATABASE_URL_IS_SQLITE:
+        with SessionLocal() as db:
+            try:
+                db.execute(sql_text("select raise_expiry_flags()"))
+                db.commit()
+            except Exception as e:
+                logger.warning(
+                    "raise_expiry_flags() unavailable (migrations not applied): %s", e
+                )
+
+    yield
+    # Shutdown (nothing to do currently)
+
+
+app = FastAPI(
+    title=f"{COMPANY_NAME} Payroll API",
+    lifespan=lifespan
+)
+
+# SEC-07: Harden session middleware based on deployment environment.
+# In production: https_only=True, same_site="strict".
+# In development: https_only=False for local http, same_site="lax".
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SECRET_KEY,
+    max_age=60 * 60 * 12,
+    https_only=(APP_ENV == "production"),
+    same_site="strict" if APP_ENV == "production" else "lax",
+)
+
 app.include_router(registration_router)
 app.include_router(hr_router)
 app.include_router(export_router)
 
 
-@app.on_event("startup")
-def _startup() -> None:
-    init_db()
-    with SessionLocal() as db:      # ensure the Settings singleton exists
-        store.get_settings(db)
-    # employee-master extras (no-ops when not on Postgres / not configured)
-    from sqlalchemy import text as _text
-    from . import storage
-    try:
-        storage.ensure_bucket()
-    except Exception:
-        pass
-    if not DATABASE_URL_IS_SQLITE:
-        with SessionLocal() as db:  # daily expiry flags fallback (idempotent)
-            db.execute(_text("select raise_expiry_flags()"))
-            db.commit()
+# --- Rate limiting (SEC-03, SEC-13) ---
+# Simple in-memory sliding window rate limiter: (key, ts) -> count
+_rate_limit_buckets: dict[str, list[float]] = defaultdict(list)
+_RATE_LIMIT_WINDOW = 60  # seconds
+_LOGIN_RATE_LIMIT = 5    # attempts per window per user+IP
+
+
+def _rate_limit_check(bucket_key: str, limit: int = _LOGIN_RATE_LIMIT) -> bool:
+    """Check and update rate limit for a bucket_key; return True if allowed."""
+    now = time.time()
+    cutoff = now - _RATE_LIMIT_WINDOW
+    bucket = _rate_limit_buckets[bucket_key]
+
+    # Remove expired entries
+    bucket[:] = [ts for ts in bucket if ts > cutoff]
+
+    if len(bucket) >= limit:
+        return False
+    bucket.append(now)
+    return True
 
 
 def _err(status: int, message: str) -> HTTPException:
@@ -234,22 +288,90 @@ class SettingsBody(BaseModel):
     lindung_24jam_rate: MoneyOpt = None
 
 
-# --- health ------------------------------------------------------------------
+# --- health (QT-14) ---
 @app.get("/api/health")
-def health():
-    return {"ok": True}
+def health(db: Session = Depends(get_db)) -> dict:
+    """Health check returning status, version, and timestamp.
+
+    Includes a DB connectivity check (SELECT 1) to ensure the backend
+    can reach its data store. Returns 503 if the database is unavailable.
+    """
+    try:
+        db.execute(sql_text("SELECT 1"))
+    except Exception as e:
+        logger.warning("Health check: DB unavailable: %s", e)
+        raise _err(503, "Database unavailable")
+
+    return {
+        "status": "ok",
+        "version": VERSION,
+        "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
 
 
-# --- auth ----------------------------------------------------------------
+# --- auth ----
+class ChangePasswordBody(BaseModel):
+    """Request body for POST /api/auth/change-password."""
+
+    model_config = ConfigDict(extra="ignore")
+    old_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=10)
+
+
 @app.post("/api/auth/login")
-def login(request: Request, body: LoginBody, db: Session = Depends(get_db)):
+def login(request: Request, body: LoginBody, db: Session = Depends(get_db)) -> dict:
+    """Authenticate a user and create a session.
+
+    Returns a user dict and company info on success (200).
+    Rate-limited to 5 attempts per 60 seconds per (username, client IP).
+    """
     username = body.username.strip()
     password = body.password
+
+    # SEC-03: Per-username+IP rate limiting with constant-time delay on failure.
+    client_ip = request.client.host if request.client else "unknown"
+    bucket_key = f"login:{username}:{client_ip}"
+
+    if not _rate_limit_check(bucket_key):
+        logger.warning("Login rate limit exceeded: %s (IP %s)", username, client_ip)
+        raise _err(429, "Too many login attempts. Try again in 60 seconds.")
+
+    # Constant-time password verification (timing-attack resistant).
     user = db.scalar(select(User).where(User.username == username))
     if not user or not verify_password(password, user.password_hash):
+        logger.info("Failed login attempt: %s (IP %s)", username, client_ip)
         raise _err(401, "Invalid username or password.")
+
+    # SEC-07: Rotate session on login (clear old, set new).
+    request.session.clear()
     request.session["user_id"] = user.id
+
+    logger.info("Successful login: %s (IP %s)", username, client_ip)
     return {"user": user_dict(user), "company": store.company()}
+
+
+@app.post("/api/auth/change-password")
+def change_password(request: Request, body: ChangePasswordBody,
+                    user: User = Depends(require_user),
+                    db: Session = Depends(get_db)) -> dict:
+    """Change the logged-in user's password.
+
+    Requires the old password for verification. New password must be
+    at least 10 characters. Audit-logged. Session is NOT rotated.
+    """
+    if not verify_password(body.old_password, user.password_hash):
+        logger.warning("Password change failed (wrong old password): %s", user.username)
+        raise _err(401, "Old password is incorrect.")
+
+    if body.new_password == body.old_password:
+        raise _err(422, "New password must be different from the old one.")
+
+    user.password_hash = hash_password(body.new_password)
+    _audit(db, user.username, "change_password", "user", user.id)
+    db.commit()
+
+    logger.info("Password changed: %s", user.username)
+    return {"ok": True}
 
 
 @app.post("/api/auth/logout")

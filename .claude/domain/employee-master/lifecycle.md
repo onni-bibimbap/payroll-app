@@ -6,9 +6,10 @@ Sources: PRD Phases 1–3, `README.md`, migrations `0002,0003,0005,0006`, `backe
 - R2 [confirmed] Activation (`POST /api/hr/employees/{id}/approve`) is the **only** path to `active` and requires: no open blocker flags, a verified bank account, a position, pay details; writes `employee_positions`, `pay_profiles`, status history, assigns `employee_no` (ONNI-… sequence).
 - R3 [confirmed] Resignation requires notice date + last working day; terminated/absconded require last working day.
 - R4 [confirmed] NRIC/passport, bank account, phone are **TEXT always** — spreadsheet numeric cells corrupted legacy data (scientific notation, lost leading zeros). Enforce in schema, validation, UI.
-- R5 [confirmed] Flag catalog (severity, triggers) per README table: `invalid_identity_no`, `corrupted_bank_account`, `unverified_bank_account`, `work_authorization_review`, `missing_document`, `typhoid_expiring/expired`, `work_permit_expiring`, `ambiguous_salary`, `suspicious_dob`, `duplicate_suspect`. Imported/self-submitted bank accounts are blocker-flagged until HR verifies.
+- R5 [confirmed] Flag catalog (severity, triggers) per README table: `invalid_identity_no`, `corrupted_bank_account`, `unverified_bank_account`, `work_authorization_review`, `missing_document`, `typhoid_expiring/expired`, `work_permit_expiring`, `ambiguous_salary`, `suspicious_dob`, `duplicate_suspect`, `resubmission_requested`. Imported/self-submitted bank accounts are blocker-flagged until HR verifies.
 - R6 [confirmed] Legacy import is idempotent (keyed `application_submissions.reference_no = GF-<row>`); every recovery/guess raises a flag — **zero silent fixes**.
-- R7 [confirmed] Expected salary from the form is a suggestion stored in payload only; the real `pay_profiles` row is created by HR at approval.
+- R7 [confirmed] Expected salary from the form is a suggestion stored in payload only; the real `pay_profiles` row is created by HR at activation.
+- R8 [confirmed] Resubmission flow: HR calls `POST /api/hr/employees/{id}/request-resubmission` with a note; flag is raised; applicant uses their reference number to re-upload documents/correct fields; HR resolves the flag once satisfied.
 
 ## Hazards
 - H1 [confirmed] NRIC recovery: scientific-notation cells expand to 11–12 digits; 11 digits may mean a lost leading zero; YYMMDD prefix must parse as a date. Alpha-prefixed → passport; `UNHCR` → unhcr type + blocker.

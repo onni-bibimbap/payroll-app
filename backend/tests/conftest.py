@@ -54,12 +54,18 @@ def client(db: Session) -> Iterator[object]:
     from fastapi.testclient import TestClient  # noqa: PLC0415 (lazy: httpx)
 
     from app.database import get_db
-    from app.main import app
+    from app.main import app, _rate_limit_buckets
 
     def _override() -> Iterator[Session]:
         yield db
 
     app.dependency_overrides[get_db] = _override
+
+    # Clear rate limit buckets before each test so login rate limiting
+    # doesn't carry over between tests (SEC-03).
+    _rate_limit_buckets.clear()
+
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.pop(get_db, None)
+    _rate_limit_buckets.clear()

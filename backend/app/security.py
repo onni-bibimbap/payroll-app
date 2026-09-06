@@ -63,3 +63,11 @@ def require_approver(user: User = Depends(require_user)) -> User:
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             "Approver or admin role required for this action.")
     return user
+
+
+def require_admin(user: User = Depends(require_user)) -> User:
+    """Require admin role (both can_prepare and can_approve)."""
+    if not (user.can_prepare and user.can_approve):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "Admin role required for this action.")
+    return user

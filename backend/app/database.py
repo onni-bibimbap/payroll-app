@@ -29,7 +29,19 @@ def get_db() -> Iterator[Session]:
 
 
 def init_db() -> None:
-    """Create all tables (idempotent)."""
-    from . import models  # noqa: F401  (register models on Base)
+    """Create all tables if using SQLite; fail fast if Postgres without migrations.
 
-    Base.metadata.create_all(bind=engine)
+    INFRA-04: For Postgres, the schema source of truth is supabase/migrations,
+    applied by the migrate service (or external management). create_all should
+    only run on local SQLite (dev fallback).
+
+    For fresh Postgres without migrations applied, models with enum types
+    (Employee.status, identity_type) will raise an error referencing non-existent
+    types, which is correct — it signals that migrations must be run first.
+    """
+    from . import models  # noqa: F401  (register models on Base)
+    from .config import DATABASE_URL
+
+    # Create tables only for SQLite dev/test; Postgres schema is managed by migrations.
+    if DATABASE_URL.startswith("sqlite"):
+        Base.metadata.create_all(bind=engine)

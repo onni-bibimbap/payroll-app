@@ -248,7 +248,7 @@ def import_worksheet(db, ws) -> dict:
     urgent: list[str] = []
 
     if True:
-        db.execute(text("set onni.bypass_lifecycle = '1'"))
+        db.execute(text("set local onni.bypass_lifecycle = '1'"))
         employees = db.scalars(select(Employee)).all()
         by_key = {}
         for e in employees:

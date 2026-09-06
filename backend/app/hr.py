@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import text
@@ -17,6 +18,8 @@ from . import storage
 from .database import get_db
 from .models import Employee, User
 from .security import require_user
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/hr", tags=["hr"])
 
@@ -305,31 +308,32 @@ def terminate(emp_id: int, status: str, body: dict = Body(default={}),
     return {"ok": True}
 
 
-GOOGLE_SHEET_ID = __import__("os").environ.get(
-    "GOOGLE_SHEET_ID", "1uQxJ4Pa6YIc6bIz01WB5bBUU78V6nvtSIIU5Jv5oE_A")
+GOOGLE_SHEET_ID = __import__("os").environ.get("GOOGLE_SHEET_ID", "")
 
 
 @router.post("/sync-google-sheet")
 def sync_google_sheet(user: User = Depends(require_hr), db: Session = Depends(get_db)):
     """Pull the live Google Form responses sheet and import any new rows as
     pending_review applicants. Idempotent (keyed GF-<row>); employees HR has
-    already approved/rejected are never modified."""
-    import io as _io
-    import sys as _sys
-    from pathlib import Path as _Path
+    already approved/rejected are never modified.
 
+    Requires GOOGLE_SHEET_ID environment variable to be set.
+    """
+    if not GOOGLE_SHEET_ID:
+        raise HTTPException(503, "Google Sheets import not configured (GOOGLE_SHEET_ID not set)")
+
+    import io as _io
     import httpx
     import openpyxl
+    from ..import_legacy_form import import_worksheet
 
     url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=xlsx"
     try:
         r = httpx.get(url, follow_redirects=True, timeout=30)
         r.raise_for_status()
-    except httpx.HTTPError:
+    except httpx.HTTPError as e:
+        logger.warning("Failed to download Google Sheet: %s", e)
         raise HTTPException(502, "Could not download the Google Sheet — check link sharing is on.")
-
-    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
-    from import_legacy_form import import_worksheet
 
     wb = openpyxl.load_workbook(_io.BytesIO(r.content), data_only=True)
     ws = wb[wb.sheetnames[0]]
@@ -343,8 +347,39 @@ def sync_google_sheet(user: User = Depends(require_hr), db: Session = Depends(ge
     }
 
 
+@router.post("/employees/{emp_id}/request-resubmission")
+def request_resubmission(emp_id: int, body: dict = Body(default={}),
+                         user: User = Depends(require_hr),
+                         db: Session = Depends(get_db)):
+    """GAP-06: Request that an applicant resubmit their application/documents.
+
+    Sets a resubmission_requested flag with the provided note.
+    The flag can be resolved/dismissed once resubmission is complete.
+    """
+    emp = _emp(db, emp_id)
+    if emp.status not in ("applicant", "pending_review"):
+        raise HTTPException(409, "Only applicants can be asked to resubmit.")
+
+    note = str(body.get("note") or "").strip()
+    if not note:
+        raise HTTPException(422, "A note explaining why resubmission is requested is required.")
+
+    db.execute(text("""
+        insert into hr_review_flags (employee_id, flag_type, severity, details, raised_by)
+        values (:eid, 'resubmission_requested', 'info', :details, :user)
+    """), {
+        "eid": emp_id,
+        "details": json.dumps({"note": note}),
+        "user": user.username
+    })
+    _audit(db, user.username, "request_resubmission", "employee", emp_id, None)
+    db.commit()
+    return {"ok": True}
+
+
 @router.get("/compliance")
 def compliance(user: User = Depends(require_hr), db: Session = Depends(get_db)):
+    """Expiry warnings and payroll blockers compliance board."""
     db.execute(text("select raise_expiry_flags()"))
     db.commit()
     expiries = db.execute(text("""
